@@ -1,4 +1,5 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -82,6 +83,32 @@ describe("Pi launch", () => {
       stdout: Buffer.from('{"argv":["--mode","json","hello"],"stdin":"seed-bytes"}'),
       stderr: Buffer.from("child-stderr"),
     });
+  });
+
+  it("accepts a packaged CLI whose basename begins with two dots", async () => {
+    const built = await fixture();
+    const manifest = join(
+      built.root,
+      "node_modules",
+      "@earendil-works",
+      "pi-coding-agent",
+      "package.json",
+    );
+    const cli = join(dirname(manifest), "..cli.cjs");
+    await writeFile(cli, "");
+    await writeFile(manifest, `${JSON.stringify({ bin: { pi: "..cli.cjs" } })}\n`);
+
+    expect(resolvePiLaunch(built.deps)).toEqual({
+      executable: process.execPath,
+      argvPrefix: [realpathSync(cli)],
+      kind: "package-node-cli",
+    });
+  });
+
+  it("uses one package-entry resolution strategy without a manifest-resolution fallback", async () => {
+    const source = await readFile(new URL("../src/launch.ts", import.meta.url), "utf8");
+    expect(source).not.toContain("createRequire");
+    expect(source).not.toContain("package entry resolve failed");
   });
 
   it("rejects escaped package bins and oversized Windows command lines loudly", async () => {

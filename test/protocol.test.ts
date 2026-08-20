@@ -13,6 +13,12 @@ describe("child protocol framing", () => {
     );
   });
 
+  it("rejects top-level values that cannot form a JSON record", () => {
+    for (const value of [undefined, () => undefined, Symbol("value")]) {
+      expect(() => encodeJsonLine(value)).toThrow(/JSON/);
+    }
+  });
+
   it("decodes chunked UTF-8 JSONL and accepts CRLF by stripping only the trailing CR", () => {
     const decoder = new JsonLineDecoder((value) => value as { value: string });
     expect(decoder.push(Buffer.from('{"value":"hé'))).toEqual([]);

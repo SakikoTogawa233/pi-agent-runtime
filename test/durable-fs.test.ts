@@ -49,8 +49,10 @@ describe("private durable files", () => {
 });
 
 describe("path containment", () => {
-  it("accepts a child path and resolves it under the parent", () => {
+  it("accepts child paths including basenames that begin with two dots", () => {
     expect(pathInside("/tmp/root", "/tmp/root/a/b")).toBe(true);
+    expect(pathInside("/tmp/root", "/tmp/root/..cache")).toBe(true);
+    expect(resolveContainedPath("/tmp/root", "..cache/item")).toBe("/tmp/root/..cache/item");
     expect(resolveContainedPath("/tmp/root", "a/b")).toBe("/tmp/root/a/b");
     expect(() => assertPathContained("/tmp/root", "/tmp/root/a/b")).not.toThrow();
   });

@@ -23,6 +23,14 @@ describe("canonical JSON and SHA-256", () => {
     expect(canonicalJson(value)).toBe('{"a":{"x":"é","y":true},"z":[{"alpha":1,"beta":2},3]}');
   });
 
+  it("rejects values that JSON would silently omit or coerce", () => {
+    for (const value of [undefined, () => undefined, Symbol("value"), 1n, Number.NaN, Infinity]) {
+      expect(() => canonicalJson(value)).toThrow(/JSON/);
+    }
+    expect(() => canonicalJson({ kept: true, omitted: undefined })).toThrow(/JSON/);
+    expect(() => canonicalJson(["kept", undefined])).toThrow(/JSON/);
+  });
+
   it("matches the frozen SHA-256 vectors", async () => {
     const bytes = Buffer.from("agent-runtime\n", "utf8");
     const expected = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
