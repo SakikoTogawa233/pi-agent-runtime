@@ -93,7 +93,7 @@ export const ANTHROPIC_ATTRIBUTION_CLAIM_CHANNEL =
 const ANTHROPIC_ATTRIBUTION_CLAIM_SCHEMA = "pi-agent-runtime.anthropic-attribution.claim.v1";
 const NATIVE_ATTESTATION_PLACEHOLDER = "00000";
 const ANTHROPIC_CACHE_CONTROL_BREAKPOINT_LIMIT = 4;
-const ANTHROPIC_ATTRIBUTION_PROOF_KEY = "__pi_agent_runtime_anthropic_attribution_v1";
+const ANTHROPIC_ATTRIBUTION_PROOF = Symbol("pi-agent-runtime.anthropic-attribution-proof.v1");
 const ANTHROPIC_ATTRIBUTION_PROOF_SECRET = randomBytes(32);
 
 interface ExpectedAnthropicAttribution {
@@ -966,12 +966,16 @@ export function rewriteAnthropicRequestPayload(args: {
     },
     system: rewrittenSystem,
   };
-  rewritten[ANTHROPIC_ATTRIBUTION_PROOF_KEY] = encodeAnthropicAttributionProof({
-    accountUuid: args.account.accountUuid,
-    deviceId: args.account.deviceId,
-    sessionId,
-    billingSystemText,
-    identityBlocks: [structuredClone(firstIdentityBlock), structuredClone(secondIdentityBlock)],
+  Object.defineProperty(rewritten, ANTHROPIC_ATTRIBUTION_PROOF, {
+    value: encodeAnthropicAttributionProof({
+      accountUuid: args.account.accountUuid,
+      deviceId: args.account.deviceId,
+      sessionId,
+      billingSystemText,
+      identityBlocks: [structuredClone(firstIdentityBlock), structuredClone(secondIdentityBlock)],
+    }),
+    enumerable: true,
+    configurable: true,
   });
   if (thinking !== undefined) rewritten["thinking"] = thinking;
   assertCacheControlBreakpointLimit(rewritten);
@@ -1442,8 +1446,8 @@ function validateExpectedAnthropicAttribution(
   payload: JsonObject,
   expectedSessionId: string | undefined,
 ): ExpectedAnthropicAttribution {
-  const proof = payload[ANTHROPIC_ATTRIBUTION_PROOF_KEY];
-  delete payload[ANTHROPIC_ATTRIBUTION_PROOF_KEY];
+  const proof = Reflect.get(payload, ANTHROPIC_ATTRIBUTION_PROOF);
+  Reflect.deleteProperty(payload, ANTHROPIC_ATTRIBUTION_PROOF);
   const expected = decodeAnthropicAttributionProof(proof);
   if (expectedSessionId !== undefined && expected.sessionId !== expectedSessionId) {
     throw new Error("Anthropic attribution expected session identity does not match request session");
