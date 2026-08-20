@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   ANTHROPIC_ATTRIBUTION_CLAIM_CHANNEL,
-  createAnthropicAttributionExtension,
-  rewriteAnthropicRequestPayload,
   type AnthropicAttributionExtensionHost,
   type AnthropicContextLike,
+  createAnthropicAttributionExtension,
+  rewriteAnthropicRequestPayload,
 } from "../src/anthropic-attribution.js";
 
 const badLines = [
@@ -39,7 +39,10 @@ class SynchronousBus {
     handlers.push(handler);
     this.handlers.set(channel, handlers);
     return () => {
-      this.handlers.set(channel, handlers.filter((candidate) => candidate !== handler));
+      this.handlers.set(
+        channel,
+        handlers.filter((candidate) => candidate !== handler),
+      );
     };
   }
 
@@ -55,12 +58,20 @@ function recordingHost(bus: SynchronousBus): {
 } {
   const providers: unknown[] = [];
   const handlers: Array<(event: { payload: unknown }, ctx: AnthropicContextLike) => unknown> = [];
-  return {
-    host: {
-      events: bus,
-      registerProvider: (_name, config) => providers.push(config),
-      on: (_eventName, handler) => handlers.push(handler),
+  const host = {
+    events: bus,
+    registerProvider: (_name: string, config: unknown): void => {
+      providers.push(config);
     },
+    on: (
+      _eventName: string,
+      handler: (event: { payload: unknown }, ctx: AnthropicContextLike) => unknown,
+    ): void => {
+      handlers.push(handler);
+    },
+  };
+  return {
+    host: host as unknown as AnthropicAttributionExtensionHost,
     providers,
     handlers,
   };
@@ -88,12 +99,15 @@ describe("Anthropic attribution and sanitization", () => {
         deviceId: "d".repeat(64),
         accountUuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
       },
+      headerRegistered: true,
+      cacheRetention: undefined,
     }) as Record<string, unknown>;
     expect(JSON.stringify(rewritten)).not.toContain(badLines[0]);
     expect(JSON.stringify(rewritten)).not.toContain(badLines[1]);
     expect(JSON.stringify(rewritten)).not.toContain(badLines[2]);
     expect(JSON.stringify(rewritten)).toContain("keep before\\nkeep after");
-    expect(JSON.stringify(rewritten)).toContain("X-Claude-Code-Session-Id".slice(0, 0));
+    expect(JSON.stringify(rewritten)).toContain("x-anthropic-billing-header:");
+    expect(JSON.stringify(rewritten)).toContain("Claude Agent SDK");
     expect(rewritten.metadata).toEqual({
       user_id: JSON.stringify({
         account_uuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
@@ -106,10 +120,22 @@ describe("Anthropic attribution and sanitization", () => {
   it("does not apply Anthropic behavior to another provider and rejects malformed input", () => {
     const payload = { model: "gpt-5.5" };
     expect(
-      rewriteAnthropicRequestPayload({ payload, ctx: context("openai-codex"), account: { deviceId: "d", accountUuid: "a" } }),
+      rewriteAnthropicRequestPayload({
+        payload,
+        ctx: context("openai-codex"),
+        account: { deviceId: "d", accountUuid: "a" },
+        headerRegistered: true,
+        cacheRetention: undefined,
+      }),
     ).toBeUndefined();
     expect(() =>
-      rewriteAnthropicRequestPayload({ payload: [], ctx: context(), account: { deviceId: "d", accountUuid: "a" } }),
+      rewriteAnthropicRequestPayload({
+        payload: [],
+        ctx: context(),
+        account: { deviceId: "d", accountUuid: "a" },
+        headerRegistered: true,
+        cacheRetention: undefined,
+      }),
     ).toThrow(/JSON object/);
   });
 

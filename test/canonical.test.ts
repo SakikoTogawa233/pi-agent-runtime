@@ -3,17 +3,14 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  canonicalJson,
-  sha256Buffer,
-  sha256File,
-  sha256Text,
-} from "../src/canonical.js";
+import { canonicalJson, sha256Buffer, sha256File, sha256Text } from "../src/canonical.js";
 
 const tempDirectories: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(tempDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  await Promise.all(
+    tempDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
+  );
 });
 
 describe("canonical JSON and SHA-256", () => {

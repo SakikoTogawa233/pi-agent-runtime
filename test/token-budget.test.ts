@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  TOKEN_BUDGET_AFFINE_TOKENS,
   allowedInputTokens,
   estimateInputTokens,
   knownTextSegment,
   resolveTokenBudgetFamily,
+  TOKEN_BUDGET_AFFINE_TOKENS,
   unknownOutputContractSegment,
   utf8ByteClassBreakdown,
 } from "../src/token-budget.js";
@@ -15,6 +15,8 @@ describe("token estimation", () => {
       family: "openai-codex",
       profile: "strict-launch",
       allowedInputTokens: 100_000,
+      calibrationBacked: true,
+      familyResolution: "model_override",
       segments: [knownTextSegment("x".repeat(23_674))],
     });
     expect(TOKEN_BUDGET_AFFINE_TOKENS).toBe(512);
@@ -33,6 +35,9 @@ describe("token estimation", () => {
     const estimate = estimateInputTokens({
       family: "unknown",
       profile: "provable",
+      allowedInputTokens: undefined,
+      calibrationBacked: false,
+      familyResolution: "unknown_provider_floor",
       segments: [knownTextSegment("a €"), unknownOutputContractSegment(100)],
     });
     expect(estimate.byte_class_breakdown).toEqual({
@@ -46,17 +51,27 @@ describe("token estimation", () => {
   });
 
   it("resolves only the frozen backed model set and fails malformed arithmetic loudly", () => {
-    expect(resolveTokenBudgetFamily({ provider: "anthropic", model: "claude-opus-5" })).toMatchObject({
+    expect(
+      resolveTokenBudgetFamily({ provider: "anthropic", model: "claude-opus-5" }),
+    ).toMatchObject({
       family: "anthropic",
       backed: true,
       resolution: "model_override",
     });
-    expect(resolveTokenBudgetFamily({ provider: "anthropic", model: "unknown-model" })).toMatchObject({
+    expect(
+      resolveTokenBudgetFamily({ provider: "anthropic", model: "unknown-model" }),
+    ).toMatchObject({
       family: "anthropic",
       backed: false,
       resolution: "known_provider_unbacked_model",
     });
     expect(() => unknownOutputContractSegment(-1)).toThrow(/non-negative/);
-    expect(allowedInputTokens(100, { reservedOutputTokens: 60, framingReserveTokens: 30, safetyReserveTokens: 20 })).toBe(-10);
+    expect(
+      allowedInputTokens(100, {
+        reservedOutputTokens: 60,
+        framingReserveTokens: 30,
+        safetyReserveTokens: 20,
+      }),
+    ).toBe(-10);
   });
 });

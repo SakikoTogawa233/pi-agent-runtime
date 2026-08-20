@@ -5,16 +5,18 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   assertWindowsCommandLineWithinLimit,
-  resolvePiLaunch,
-  spawnPiChild,
   type PiLaunchDependencies,
   type PiLaunchSpec,
+  resolvePiLaunch,
+  spawnPiChild,
 } from "../src/launch.js";
 
 const tempDirectories: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(tempDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  await Promise.all(
+    tempDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
+  );
 });
 
 async function fixture(): Promise<{ root: string; cli: string; deps: PiLaunchDependencies }> {
@@ -84,7 +86,13 @@ describe("Pi launch", () => {
 
   it("rejects escaped package bins and oversized Windows command lines loudly", async () => {
     const built = await fixture();
-    const manifest = join(built.root, "node_modules", "@earendil-works", "pi-coding-agent", "package.json");
+    const manifest = join(
+      built.root,
+      "node_modules",
+      "@earendil-works",
+      "pi-coding-agent",
+      "package.json",
+    );
     const outside = join(built.root, "node_modules", "@earendil-works", "outside.cjs");
     await writeFile(outside, "");
     await writeFile(manifest, `${JSON.stringify({ bin: { pi: "../outside.cjs" } })}\n`);

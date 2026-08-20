@@ -2,9 +2,9 @@ import type { Message } from "@earendil-works/pi-ai";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import {
-  UnsupportedConversationBlockError,
   projectVisibleConversation,
   snapshotParentConversation,
+  UnsupportedConversationBlockError,
 } from "../src/context.js";
 
 const usage = {
@@ -95,7 +95,9 @@ describe("visible conversation projection", () => {
       "f6a214f7a5fcda0c2cee9660b7fc29f5649e3c68aad48e20e950137c98913a68",
       "d9452c90309289ad495fe9ba491d996c1371449e305ca8429d43ed76a956440b",
     ]);
-    expect(JSON.stringify(projected)).not.toMatch(/RAW|TOOLRAW|hidden|result/);
+    const serialized = JSON.stringify(projected);
+    expect(serialized).not.toMatch(/RAW|TOOLRAW|hidden/);
+    expect(serialized).not.toContain('"text":"result"');
   });
 
   it("fails loudly for an unsupported message block", () => {

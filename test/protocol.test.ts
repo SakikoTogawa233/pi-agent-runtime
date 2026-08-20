@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  JsonLineDecoder,
   encodeJsonLine,
   encodePrefixedJsonFrame,
+  JsonLineDecoder,
   parsePrefixedJsonFrames,
 } from "../src/protocol.js";
 
@@ -39,11 +39,15 @@ describe("child protocol framing", () => {
     const prefix = "\u001ePI_AGENT_RUNTIME_RESULT ";
     const first = encodePrefixedJsonFrame(prefix, { ordinal: 1 });
     const second = encodePrefixedJsonFrame(prefix, { ordinal: 2 });
-    const stderr = Buffer.concat([Buffer.from("diagnostic\n"), first, Buffer.from("more noise\n"), second]);
-    expect(parsePrefixedJsonFrames(stderr, prefix, (value) => value as { ordinal: number })).toEqual([
-      { ordinal: 1 },
-      { ordinal: 2 },
+    const stderr = Buffer.concat([
+      Buffer.from("diagnostic\n"),
+      first,
+      Buffer.from("more noise\n"),
+      second,
     ]);
+    expect(
+      parsePrefixedJsonFrames(stderr, prefix, (value) => value as { ordinal: number }),
+    ).toEqual([{ ordinal: 1 }, { ordinal: 2 }]);
     expect(() =>
       parsePrefixedJsonFrames(Buffer.from(`${prefix}{"ordinal":1}`), prefix, (value) => value),
     ).toThrow(/newline-terminated/);
