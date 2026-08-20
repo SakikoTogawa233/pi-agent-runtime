@@ -1495,12 +1495,10 @@ function parseCompleteToolArguments(text: string): JsonObject {
 
 function validCostRate(value: unknown, field: string): number {
   if (value === undefined) {
-    throw new Error(`Anthropic attribution model cost.${field} is required`);
+    throw new Error(`Anthropic attribution model ${field} is required`);
   }
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-    throw new Error(
-      `Anthropic attribution model cost.${field} must be a finite non-negative number`,
-    );
+    throw new Error(`Anthropic attribution model ${field} must be a finite non-negative number`);
   }
   return value;
 }
@@ -1512,26 +1510,48 @@ function resolveModelCostRates(
   const baseCost = model.cost;
   if (baseCost === undefined) throw new Error("Anthropic attribution model cost is required");
   let selected: PiCostRatesLike = baseCost;
+  let selectedLabel = "cost";
   let matchedThreshold = -1;
-  for (const tier of baseCost.tiers ?? []) {
-    const threshold = tier.inputTokensAbove;
-    if (
-      typeof threshold === "number" &&
-      Number.isFinite(threshold) &&
-      threshold >= 0 &&
-      totalInputTokens > threshold &&
-      threshold > matchedThreshold
-    ) {
+  if (baseCost.tiers !== undefined && !Array.isArray(baseCost.tiers)) {
+    throw new Error("Anthropic attribution model cost.tiers must be an array");
+  }
+  for (const [index, tier] of (baseCost.tiers ?? []).entries()) {
+    if (!isPlainObject(tier)) {
+      throw new Error(`Anthropic attribution model cost.tiers[${String(index)}] must be an object`);
+    }
+    const threshold = tier["inputTokensAbove"];
+    if (typeof threshold !== "number" || !Number.isFinite(threshold) || threshold < 0) {
+      throw new Error(
+        `Anthropic attribution model cost.tiers[${String(index)}].inputTokensAbove must be a finite non-negative number`,
+      );
+    }
+    validCostRate(tier["input"], `cost.tiers[${String(index)}].input`);
+    validCostRate(tier["output"], `cost.tiers[${String(index)}].output`);
+    validCostRate(tier["cacheRead"], `cost.tiers[${String(index)}].cacheRead`);
+    validCostRate(tier["cacheWrite"], `cost.tiers[${String(index)}].cacheWrite`);
+    if (totalInputTokens > threshold && threshold > matchedThreshold) {
       selected = tier;
+      selectedLabel = `cost.tiers[${String(index)}]`;
       matchedThreshold = threshold;
     }
   }
   return {
-    input: validCostRate(selected.input, "input"),
-    output: validCostRate(selected.output, "output"),
-    cacheRead: validCostRate(selected.cacheRead, "cacheRead"),
-    cacheWrite: validCostRate(selected.cacheWrite, "cacheWrite"),
+    input: validCostRate(selected.input, `${selectedLabel}.input`),
+    output: validCostRate(selected.output, `${selectedLabel}.output`),
+    cacheRead: validCostRate(selected.cacheRead, `${selectedLabel}.cacheRead`),
+    cacheWrite: validCostRate(selected.cacheWrite, `${selectedLabel}.cacheWrite`),
   };
+}
+
+function optionalUsageInteger(usage: JsonObject, key: string): number | undefined {
+  const value = usage[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(
+      `Anthropic attribution received malformed usage.${key}; expected a non-negative safe integer`,
+    );
+  }
+  return value;
 }
 
 export function updateAnthropicUsage(
@@ -1539,19 +1559,25 @@ export function updateAnthropicUsage(
   usage: JsonObject | undefined,
   model: PiModelLike,
 ): void {
-  if (!usage) return;
-  if (typeof usage["input_tokens"] === "number") output.usage.input = usage["input_tokens"];
-  if (typeof usage["output_tokens"] === "number") output.usage.output = usage["output_tokens"];
-  if (typeof usage["cache_read_input_tokens"] === "number")
-    output.usage.cacheRead = usage["cache_read_input_tokens"];
+  if (usage === undefined) return;
+  const inputTokens = optionalUsageInteger(usage, "input_tokens");
+  const outputTokens = optionalUsageInteger(usage, "output_tokens");
+  const cacheReadTokens = optionalUsageInteger(usage, "cache_read_input_tokens");
+  const cacheWriteTokens = optionalUsageInteger(usage, "cache_creation_input_tokens");
+  if (inputTokens !== undefined) output.usage.input = inputTokens;
+  if (outputTokens !== undefined) output.usage.output = outputTokens;
+  if (cacheReadTokens !== undefined) output.usage.cacheRead = cacheReadTokens;
   const cacheCreation = usage["cache_creation"];
+  if (cacheCreation !== undefined && !isPlainObject(cacheCreation)) {
+    throw new Error("Anthropic attribution received malformed usage.cache_creation");
+  }
   const reportedLongCacheWrite =
-    isPlainObject(cacheCreation) && typeof cacheCreation["ephemeral_1h_input_tokens"] === "number"
-      ? cacheCreation["ephemeral_1h_input_tokens"]
-      : undefined;
-  if (typeof usage["cache_creation_input_tokens"] === "number") {
-    output.usage.cacheWrite = usage["cache_creation_input_tokens"];
-    output.usage.cacheWrite1h = reportedLongCacheWrite ?? 0;
+    cacheCreation === undefined
+      ? undefined
+      : optionalUsageInteger(cacheCreation, "ephemeral_1h_input_tokens");
+  if (cacheWriteTokens !== undefined) {
+    output.usage.cacheWrite = cacheWriteTokens;
+    output.usage.cacheWrite1h = reportedLongCacheWrite === undefined ? 0 : reportedLongCacheWrite;
   } else if (reportedLongCacheWrite !== undefined) {
     output.usage.cacheWrite1h = reportedLongCacheWrite;
   }
