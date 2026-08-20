@@ -151,9 +151,13 @@ describe("Anthropic request contracts", () => {
       "none",
     );
     vi.stubEnv("PI_CACHE_RETENTION", "short");
-    expect(() => resolveCacheRetentionPreference({ env: { PI_CACHE_RETENTION: "LONG" } })).toThrow(
-      /PI_CACHE_RETENTION/,
-    );
+    for (const malformed of ["LONG", ""]) {
+      expect(() =>
+        resolveCacheRetentionPreference({ env: { PI_CACHE_RETENTION: malformed } }),
+      ).toThrow(/PI_CACHE_RETENTION/);
+    }
+    vi.stubEnv("PI_CACHE_RETENTION", "LONG");
+    expect(() => resolveCacheRetentionPreference({ env: {} })).toThrow(/PI_CACHE_RETENTION/);
     for (const invalid of ["", "LONG", "invalid", null, 1]) {
       expect(() =>
         resolveCacheRetentionPreference({ cacheRetention: invalid as never, env: {} }),
@@ -283,24 +287,32 @@ describe("Anthropic request contracts", () => {
   });
 
   it("accepts host-valid unsigned interrupted thinking without inventing a signature", () => {
-    const params = buildAnthropicRequestParams(
-      anthropicModel,
-      {
-        messages: [
-          {
-            role: "assistant",
-            content: [{ type: "thinking", thinking: "interrupted reasoning" }],
-          },
-        ] as never,
-      },
-      { cacheRetention: "none" },
-    );
-    expect(params.messages).toEqual([
-      {
-        role: "assistant",
-        content: [{ type: "text", text: "interrupted reasoning" }],
-      },
-    ]);
+    for (const thinkingSignature of [undefined, ""] as const) {
+      const params = buildAnthropicRequestParams(
+        anthropicModel,
+        {
+          messages: [
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "thinking",
+                  thinking: "interrupted reasoning",
+                  ...(thinkingSignature === undefined ? {} : { thinkingSignature }),
+                },
+              ],
+            },
+          ] as never,
+        },
+        { cacheRetention: "none" },
+      );
+      expect(params.messages).toEqual([
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "interrupted reasoning" }],
+        },
+      ]);
+    }
   });
 
   it("rejects unknown message roles and malformed thinking blocks", () => {
@@ -313,6 +325,7 @@ describe("Anthropic request contracts", () => {
     ).toThrow(/message role/i);
     for (const content of [
       [{ type: "thinking", thinking: 42 }],
+      [{ type: "thinking", thinking: "reasoning", thinkingSignature: 42 }],
       [{ type: "thinking", thinking: "redacted", redacted: true }],
     ]) {
       expect(() =>
@@ -381,6 +394,25 @@ describe("Anthropic request contracts", () => {
         { cacheRetention: "none" },
       ),
     ).toThrow(/requires JSON-schema constrained sampling.*unsupported/i);
+    expect(() =>
+      buildAnthropicRequestParams(
+        { ...anthropicModel, compat: { ...anthropicModel.compat, supportsStrictTools: true } },
+        {
+          ...userContext(),
+          tools: [
+            {
+              ...strictTool,
+              parameters: {
+                type: "object",
+                properties: {},
+                $ref: "#/$defs/input",
+              } as never,
+            },
+          ],
+        },
+        { cacheRetention: "none" },
+      ),
+    ).toThrow(/requires JSON-schema constrained sampling.*\$ref schemas are unsupported/i);
 
     const preferred = buildAnthropicRequestParams(
       { ...anthropicModel, compat: { ...anthropicModel.compat, supportsStrictTools: false } },
@@ -870,6 +902,22 @@ describe("Anthropic beta messages transport", () => {
     expect(noRetryFetch).toHaveBeenCalledTimes(1);
     expect(rejected.stopReason).toBe("error");
     expect(rejected.errorMessage).toMatch(/HTTP 503.*do not retry/);
+
+    const nonExactFetch = vi.fn().mockResolvedValue(
+      new Response("non-exact directive", {
+        status: 400,
+        statusText: "Bad Request",
+        headers: { "x-should-retry": "TRUE" },
+      }),
+    );
+    const nonExact = await streamAnthropicViaBetaMessages(
+      anthropicModel,
+      userContext(),
+      streamOptions({ fetch: nonExactFetch, maxRetries: 1 }),
+    ).result();
+    expect(nonExactFetch).toHaveBeenCalledTimes(1);
+    expect(nonExact.stopReason).toBe("error");
+    expect(nonExact.errorMessage).toMatch(/HTTP 400.*non-exact directive/);
   });
 
   it("honors maxRetryDelayMs and keeps custom fetch across retries", async () => {
