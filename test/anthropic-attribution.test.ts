@@ -172,6 +172,82 @@ describe("Anthropic request contracts", () => {
     }
   });
 
+  it("preserves frozen supplementary Unicode vectors and replaces only unpaired surrogates", () => {
+    const nonBmp = "😀𝄞𠜎";
+    const high = String.fromCharCode(0xd83d);
+    const low = String.fromCharCode(0xde00);
+    const params = buildAnthropicRequestParams(
+      anthropicModel,
+      {
+        messages: [
+          { role: "user", content: `user ${nonBmp} ${high}A${low}${high}${low}` },
+          {
+            role: "assistant",
+            content: [
+              { type: "text", text: `assistant ${nonBmp}` },
+              {
+                type: "thinking",
+                thinking: `thinking ${nonBmp}`,
+                thinkingSignature: "signature",
+              },
+            ],
+          },
+          {
+            role: "toolResult",
+            toolCallId: "call-1",
+            content: [{ type: "text", text: `tool ${nonBmp}` }],
+            isError: false,
+          },
+        ],
+      },
+      { cacheRetention: "none" },
+    );
+
+    expect(params.messages).toEqual([
+      { role: "user", content: `user ${nonBmp} �A�${high}${low}` },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: `assistant ${nonBmp}` },
+          {
+            type: "thinking",
+            thinking: `thinking ${nonBmp}`,
+            signature: "signature",
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call-1",
+            content: `tool ${nonBmp}`,
+            is_error: false,
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("requires an explicit tool-result isError boolean", () => {
+    expect(() =>
+      buildAnthropicRequestParams(
+        anthropicModel,
+        {
+          messages: [
+            {
+              role: "toolResult",
+              toolCallId: "call-1",
+              content: [{ type: "text", text: "result" }],
+            },
+          ] as never,
+        },
+        { cacheRetention: "none" },
+      ),
+    ).toThrow(/isError.*boolean/);
+  });
+
   it("rejects unknown message roles and incomplete thinking blocks", () => {
     expect(() =>
       buildAnthropicRequestParams(

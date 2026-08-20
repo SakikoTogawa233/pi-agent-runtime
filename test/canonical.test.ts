@@ -23,7 +23,15 @@ describe("canonical JSON and SHA-256", () => {
   });
 
   it("rejects values that JSON would silently omit or coerce", () => {
-    for (const value of [undefined, () => undefined, Symbol("value"), 1n, Number.NaN, Infinity]) {
+    for (const value of [
+      undefined,
+      () => undefined,
+      Symbol("value"),
+      1n,
+      Number.NaN,
+      Infinity,
+      -0,
+    ]) {
       expect(() => canonicalJson(value)).toThrow(/JSON/);
     }
     expect(() => canonicalJson({ kept: true, omitted: undefined })).toThrow(/JSON/);

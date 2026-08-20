@@ -21,8 +21,8 @@ describe("child protocol framing", () => {
     ).toEqual(["null\n", "true\n", "3\n", '"text"\n', "[1,2]\n", '{"value":1}\n']);
   });
 
-  it("rejects top-level values that cannot form a JSON record", () => {
-    for (const value of [undefined, () => undefined, Symbol("value")]) {
+  it("rejects top-level values that cannot form an injective JSON record", () => {
+    for (const value of [undefined, () => undefined, Symbol("value"), -0]) {
       expect(() => encodeJsonLine(value)).toThrow(/JSON/);
     }
   });
