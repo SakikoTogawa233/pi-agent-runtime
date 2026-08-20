@@ -74,6 +74,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "check": "biome check .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
