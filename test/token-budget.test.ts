@@ -95,17 +95,26 @@ describe("token estimation", () => {
     expect(two.tokens).toBe(one.tokens);
     expect(two.rate_buckets).toEqual(one.rate_buckets);
 
-    const dense = estimateInputTokens({
+    expect(() =>
+      estimateInputTokens({
+        family: "openai-codex",
+        profile: "calibrated",
+        allowedInputTokens: 231_040,
+        calibrationBacked: true,
+        familyResolution: "model_override",
+        segments: [knownTextSegment("A".repeat(600_000))],
+      }),
+    ).toThrow(/calibrated.*dense|dense.*calibrated/i);
+    const denseStrict = estimateInputTokens({
       family: "openai-codex",
-      profile: "calibrated",
+      profile: "strict-runtime",
       allowedInputTokens: 231_040,
       calibrationBacked: true,
       familyResolution: "model_override",
       segments: [knownTextSegment("A".repeat(600_000))],
     });
-    expect(dense.tokens).toBe(300_512);
-    expect(dense.rateSource.source).toBe("conservative_dense_ascii_whitespace_gate");
-    expect(dense.rateSource.dominant_byte_class).toBe("dense_ascii");
+    expect(denseStrict.tokens).toBe(600_512);
+    expect(denseStrict.rateSource.source).toBe("strict_launch");
 
     const multibyte = estimateInputTokens({
       family: "openai-codex",
@@ -158,13 +167,29 @@ describe("token estimation", () => {
       backed: true,
       resolution: "model_override",
     });
-    expect(
+    expect(() =>
       resolveTokenBudgetFamily({ provider: "anthropic", model: "unknown-model" }),
-    ).toMatchObject({
-      family: "anthropic",
-      backed: false,
-      resolution: "known_provider_unbacked_model",
-    });
+    ).toThrow(/no calibrated token family/i);
+    expect(() =>
+      estimateInputTokens({
+        family: "openai-codex",
+        profile: "calibrated",
+        allowedInputTokens: 100_000,
+        calibrationBacked: false,
+        familyResolution: "model_override",
+        segments: [knownTextSegment("word ".repeat(20_000))],
+      }),
+    ).toThrow(/calibrated.*backing/i);
+    expect(() =>
+      estimateInputTokens({
+        family: "openai-codex",
+        profile: "calibrated",
+        allowedInputTokens: 100_000,
+        calibrationBacked: true,
+        familyResolution: "model_override",
+        segments: [knownTextSegment("small prompt")],
+      }),
+    ).toThrow(/calibrated.*minimum/i);
     expect(() => unknownOutputContractSegment(-1)).toThrow(/non-negative/);
     expect(
       allowedInputTokens(100, {

@@ -1,7 +1,7 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { canonicalJson } from "../src/canonical.js";
 import { describe, expect, it } from "vitest";
+import { canonicalJson } from "../src/canonical.js";
 import {
   projectVisibleConversation,
   resolveEffectiveLeaf,
@@ -140,13 +140,26 @@ describe("visible conversation projection", () => {
 });
 
 describe("parent snapshot", () => {
+  it("requires the exact active tool-call id instead of falling back to a name match", () => {
+    expect(() =>
+      resolveEffectiveLeaf(
+        {
+          getLeafId: () => "leaf",
+          getLeafEntry: () => undefined,
+          getEntries: () => [],
+        },
+        { toolCallId: undefined as never, toolName: "subagent_run", excludeActiveToolCallLeaf: true },
+      ),
+    ).toThrow(/toolCallId/);
+  });
+
   it("rejects a malformed message leaf instead of silently keeping it", () => {
     expect(() =>
       resolveEffectiveLeaf(
         {
           getLeafId: () => "leaf",
           getLeafEntry: () =>
-            ({ id: "leaf", parentId: null, type: "message", message: null } as never),
+            ({ id: "leaf", parentId: null, type: "message", message: null }) as never,
           getEntries: () => [],
         },
         { toolCallId: "active", toolName: "subagent_run", excludeActiveToolCallLeaf: true },

@@ -27,6 +27,7 @@ const anthropicModel: PiModelLike = {
   id: "claude-sonnet-4-5",
   maxTokens: 64_000,
   reasoning: true,
+  compat: { supportsLongCacheRetention: true, supportsCacheControlOnTools: true },
 };
 
 const pricedAnthropicModel: PiModelLike = {
@@ -99,6 +100,27 @@ function recordingHost(bus: SynchronousBus): {
 }
 
 describe("Anthropic request contracts", () => {
+  it("requires an explicit cache policy and explicit model capabilities", () => {
+    expect(() => resolveCacheRetentionPreference({ env: {} })).toThrow(/cache retention.*required/i);
+    expect(() =>
+      buildAnthropicRequestParams(
+        { ...anthropicModel, compat: undefined },
+        { messages: [{ role: "user", content: "hello" }] },
+        { cacheRetention: "short" },
+      ),
+    ).toThrow(/compat/);
+    expect(() =>
+      buildAnthropicRequestParams(
+        {
+          ...anthropicModel,
+          compat: { supportsLongCacheRetention: false, supportsCacheControlOnTools: true },
+        },
+        { messages: [{ role: "user", content: "hello" }] },
+        { cacheRetention: "long" },
+      ),
+    ).toThrow(/long cache retention/);
+  });
+
   it("rejects malformed direct cache retention instead of degrading it to short retention", () => {
     expect(() =>
       resolveCacheRetentionPreference({ cacheRetention: "invalid" as never, env: {} }),
@@ -128,9 +150,13 @@ describe("Anthropic request contracts", () => {
 
     for (const messages of malformedMessages) {
       expect(() =>
-        buildAnthropicRequestParams(anthropicModel, { messages: messages as never }, {
-          cacheRetention: "none",
-        }),
+        buildAnthropicRequestParams(
+          anthropicModel,
+          { messages: messages as never },
+          {
+            cacheRetention: "none",
+          },
+        ),
       ).toThrow(/message|content block/i);
     }
   });
@@ -329,7 +355,10 @@ describe("Anthropic beta messages transport", () => {
       }),
       sseEvent("message_stop", { type: "message_stop" }),
     ].join("");
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(malformedUsage, { status: 200 })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(malformedUsage, { status: 200 })),
+    );
     const usageResult = await streamAnthropicViaBetaMessages(
       pricedAnthropicModel,
       { messages: [{ role: "user", content: "hello" }] },
@@ -527,7 +556,7 @@ describe("Anthropic attribution and sanitization", () => {
     });
 
     extension(first.host);
-    extension(second.host);
+    expect(() => extension(second.host)).toThrow(/already claimed/i);
 
     expect(first.providers).toHaveLength(1);
     expect(first.handlers).toHaveLength(1);
