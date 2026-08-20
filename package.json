@@ -1,0 +1,94 @@
+{
+  "name": "@sakiko233/pi-agent-runtime",
+  "version": "0.1.0",
+  "description": "Shared audited child-agent runtime primitives for Pi subagent and Fusion packages.",
+  "keywords": [
+    "pi-coding-agent",
+    "agent-runtime",
+    "child-process",
+    "oauth",
+    "anthropic"
+  ],
+  "license": "MIT",
+  "author": "SakikoTogawa233",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SakikoTogawa233/pi-agent-runtime.git"
+  },
+  "homepage": "https://github.com/SakikoTogawa233/pi-agent-runtime#readme",
+  "bugs": {
+    "url": "https://github.com/SakikoTogawa233/pi-agent-runtime/issues"
+  },
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./anthropic-attribution": {
+      "types": "./dist/anthropic-attribution.d.ts",
+      "import": "./dist/anthropic-attribution.js"
+    },
+    "./canonical": {
+      "types": "./dist/canonical.d.ts",
+      "import": "./dist/canonical.js"
+    },
+    "./context": {
+      "types": "./dist/context.d.ts",
+      "import": "./dist/context.js"
+    },
+    "./durable-fs": {
+      "types": "./dist/durable-fs.d.ts",
+      "import": "./dist/durable-fs.js"
+    },
+    "./launch": {
+      "types": "./dist/launch.d.ts",
+      "import": "./dist/launch.js"
+    },
+    "./oauth": {
+      "types": "./dist/oauth.d.ts",
+      "import": "./dist/oauth.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol.d.ts",
+      "import": "./dist/protocol.js"
+    },
+    "./token-budget": {
+      "types": "./dist/token-budget.d.ts",
+      "import": "./dist/token-budget.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "biome check .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "pack:check": "npm run build && node scripts/check-package-payload.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "^0.84.2",
+    "@earendil-works/pi-coding-agent": "^0.84.2"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.3.5",
+    "@earendil-works/pi-ai": "0.84.2",
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@types/node": "24.3.0",
+    "typescript": "5.9.3",
+    "vitest": "2.1.9"
+  }
+}

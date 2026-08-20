@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g "npm@^11.5.1"
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test
+      - run: npm run check
+      - run: npm run pack:check
+      - id: versions
+        shell: bash
+        run: |
+          package_name=$(node -p "require('./package.json').name")
+          local_version=$(node -p "require('./package.json').version")
+          published_version=$(npm view "$package_name" version 2>/dev/null || true)
+          printf 'package_name=%s\nlocal_version=%s\npublished_version=%s\n' "$package_name" "$local_version" "$published_version" >> "$GITHUB_OUTPUT"
+      - if: steps.versions.outputs.local_version != steps.versions.outputs.published_version
+        run: npm publish --provenance --access public
+      - if: steps.versions.outputs.local_version != steps.versions.outputs.published_version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "v${{ steps.versions.outputs.local_version }}" --generate-notes
