@@ -6,7 +6,7 @@ import {
   ModelRegistry,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { anthropicAttributionExtension } from "../src/anthropic-attribution.js";
 import { observeModelRegistryOAuth } from "../src/oauth.js";
 
@@ -24,6 +24,15 @@ describe("ModelRegistry OAuth observation", () => {
       api: "anthropic-messages",
       selectedModel: model,
     });
+  });
+
+  it("passes slash-containing model ids to the registry without splitting them", () => {
+    const selected = { provider: "anthropic", id: "claude/opus", api: "anthropic-messages" };
+    const find = vi.fn(() => selected);
+    expect(
+      observeModelRegistryOAuth({ find, isUsingOAuth: () => true }, "anthropic", "claude/opus"),
+    ).toMatchObject({ provider: "anthropic", modelId: "claude/opus", selectedModel: selected });
+    expect(find).toHaveBeenCalledWith("anthropic", "claude/opus");
   });
 
   it("fails loudly for missing models, unavailable observation, and non-OAuth routes", () => {

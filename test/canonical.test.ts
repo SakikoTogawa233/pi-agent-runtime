@@ -28,6 +28,14 @@ describe("canonical JSON and SHA-256", () => {
     }
     expect(() => canonicalJson({ kept: true, omitted: undefined })).toThrow(/JSON/);
     expect(() => canonicalJson(["kept", undefined])).toThrow(/JSON/);
+    expect(() => canonicalJson(Array(1))).toThrow(/JSON/);
+    expect(() => canonicalJson(new Date(0))).toThrow(/JSON/);
+    expect(() => canonicalJson(new Map([["key", "value"]]))).toThrow(/JSON/);
+    const symbolKeyed = { kept: true, [Symbol("hidden")]: "lost" };
+    expect(() => canonicalJson(symbolKeyed)).toThrow(/JSON/);
+    const cyclic: { self?: unknown } = {};
+    cyclic.self = cyclic;
+    expect(() => canonicalJson(cyclic)).toThrow(/JSON/);
   });
 
   it("matches the frozen SHA-256 vectors", async () => {

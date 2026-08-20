@@ -13,6 +13,14 @@ describe("child protocol framing", () => {
     );
   });
 
+  it("pins every valid top-level JSON scalar and container record", () => {
+    expect(
+      [null, true, 3, "text", [1, 2], { value: 1 }].map((value) =>
+        encodeJsonLine(value).toString("utf8"),
+      ),
+    ).toEqual(["null\n", "true\n", "3\n", '"text"\n', "[1,2]\n", '{"value":1}\n']);
+  });
+
   it("rejects top-level values that cannot form a JSON record", () => {
     for (const value of [undefined, () => undefined, Symbol("value")]) {
       expect(() => encodeJsonLine(value)).toThrow(/JSON/);

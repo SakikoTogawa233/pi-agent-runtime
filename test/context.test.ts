@@ -121,6 +121,98 @@ describe("visible conversation projection", () => {
     expect(canonicalJson(mutated)).not.toContain("resulx");
   });
 
+  it("keeps a tool-heavy megabyte session bounded without exposing omitted payloads", () => {
+    const argumentsPayload = { blob: "A".repeat(600_000) };
+    const projected = projectVisibleConversation([
+      { role: "user", content: "visible user sentinel", timestamp: 1 },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "T".repeat(20_000) },
+          { type: "text", text: "visible assistant sentinel" },
+          { type: "toolCall", id: "large", name: "read", arguments: argumentsPayload },
+        ],
+        api: "openai-responses",
+        provider: "openai",
+        model: "test",
+        usage,
+        stopReason: "toolUse",
+        timestamp: 2,
+      },
+      {
+        role: "toolResult",
+        toolCallId: "large",
+        toolName: "read",
+        content: [{ type: "text", text: "R".repeat(700_000) }],
+        isError: false,
+        timestamp: 3,
+      },
+      { role: "user", content: "visible follow-up sentinel", timestamp: 4 },
+    ]);
+    const serialized = canonicalJson(projected);
+    expect(serialized).toContain("visible user sentinel");
+    expect(serialized).toContain("visible assistant sentinel");
+    expect(serialized).toContain("visible follow-up sentinel");
+    expect(serialized).not.toMatch(/A{100}|R{100}|T{100}/);
+    expect(projected.accounting).toMatchObject({
+      omitted_thinking_bytes: 20_000,
+      omitted_tool_call_count: 1,
+      omitted_tool_call_argument_bytes: Buffer.byteLength(canonicalJson(argumentsPayload), "utf8"),
+      omitted_tool_result_text_count: 1,
+      omitted_tool_result_text_bytes: 700_000,
+      tool_call_names: [{ name: "read", calls: 1 }],
+    });
+  });
+
+  it("collapses contiguous omissions into one source-ordered receipt", () => {
+    const projected = projectVisibleConversation([
+      { role: "user", content: "first", timestamp: 1 },
+      {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "c1", name: "read", arguments: {} },
+          { type: "toolCall", id: "c2", name: "read", arguments: {} },
+        ],
+        api: "openai-responses",
+        provider: "openai",
+        model: "test",
+        usage,
+        stopReason: "toolUse",
+        timestamp: 2,
+      },
+      {
+        role: "toolResult",
+        toolCallId: "c1",
+        toolName: "read",
+        content: [{ type: "text", text: "r1" }],
+        isError: false,
+        timestamp: 3,
+      },
+      {
+        role: "toolResult",
+        toolCallId: "c2",
+        toolName: "read",
+        content: [{ type: "text", text: "r2" }],
+        isError: false,
+        timestamp: 4,
+      },
+      { role: "user", content: "second", timestamp: 5 },
+    ]);
+    expect(projected.entries[1]).toEqual({
+      kind: "omitted_activity",
+      at: [1, 3],
+      bytes: 8,
+      counts: { tool_calls: 2, tool_result_texts: 2 },
+    });
+    expect(projected.ledger.entries.map((entry) => entry.index)).toEqual([0, 1, 2, 3]);
+    expect(projected.ledger.projection_map[0]).toEqual({
+      canonical_entry_index: 1,
+      entry_kind: "omitted_activity",
+      ledger_index_first: 0,
+      ledger_index_last: 3,
+    });
+  });
+
   it("fails loudly for an unsupported message block", () => {
     expect(() =>
       projectVisibleConversation([

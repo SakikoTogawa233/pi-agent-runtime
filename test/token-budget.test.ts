@@ -6,11 +6,35 @@ import {
   maxKnownTextBytesForTokens,
   resolveTokenBudgetFamily,
   TOKEN_BUDGET_AFFINE_TOKENS,
+  TOKEN_BUDGET_CALIBRATION_CORPUS_MIN_WHITESPACE_FRACTION_X10000,
+  TOKEN_BUDGET_DENSE_ASCII_WHITESPACE_THRESHOLD_X10000,
+  TOKEN_BUDGET_FAMILY_CALIBRATIONS,
+  TOKEN_BUDGET_HAIRCUT_BASIS_POINTS,
   unknownOutputContractSegment,
   utf8ByteClassBreakdown,
 } from "../src/token-budget.js";
 
 describe("token estimation", () => {
+  it("pins the calibrated affine table and provenance guards", () => {
+    expect(TOKEN_BUDGET_AFFINE_TOKENS).toBe(512);
+    expect(TOKEN_BUDGET_HAIRCUT_BASIS_POINTS).toBe(1500);
+    expect(TOKEN_BUDGET_FAMILY_CALIBRATIONS.anthropic).toMatchObject({
+      rate_bytes_per_token_x100: 173,
+      provenance: { n: 85, observed_min_bpt_x1000: 2047, backed: true },
+    });
+    expect(TOKEN_BUDGET_FAMILY_CALIBRATIONS["openai-codex"]).toMatchObject({
+      rate_bytes_per_token_x100: 289,
+      provenance: { n: 797, observed_min_bpt_x1000: 3400, backed: true },
+    });
+    expect(TOKEN_BUDGET_FAMILY_CALIBRATIONS.unknown).toMatchObject({
+      rate_bytes_per_token_x100: 100,
+      provenance: { n: 0, backed: false },
+    });
+    expect(TOKEN_BUDGET_DENSE_ASCII_WHITESPACE_THRESHOLD_X10000).toBeLessThan(
+      TOKEN_BUDGET_CALIBRATION_CORPUS_MIN_WHITESPACE_FRACTION_X10000,
+    );
+  });
+
   it("keeps the extracted affine byte-ceiling vector for strict child launches", () => {
     const estimate = estimateInputTokens({
       family: "openai-codex",
