@@ -76,6 +76,23 @@ describe("Pi launch", () => {
     expect(lookedUp).toBe(false);
   });
 
+  it("resolves both string and object JavaScript bin manifests through Node", async () => {
+    const built = await fixture();
+    const manifest = join(
+      built.root,
+      "node_modules",
+      "@earendil-works",
+      "pi-coding-agent",
+      "package.json",
+    );
+    await writeFile(manifest, `${JSON.stringify({ bin: "dist/cli.cjs" })}\n`);
+    expect(resolvePiLaunch(built.deps)).toEqual({
+      executable: process.execPath,
+      argvPrefix: [realpathSync(built.cli)],
+      kind: "package-node-cli",
+    });
+  });
+
   it("resolves and directly launches the packaged Windows Node CLI", async () => {
     const built = await fixture();
     const launch = resolvePiLaunch(built.deps);
@@ -126,6 +143,54 @@ describe("Pi launch", () => {
     expect(source).not.toContain("package entry resolve failed");
   });
 
+  it("permits native Windows package bins and rejects shell or unknown targets", async () => {
+    const built = await fixture();
+    const packageRoot = join(
+      built.root,
+      "node_modules",
+      "@earendil-works",
+      "pi-coding-agent",
+    );
+    const manifest = join(packageRoot, "package.json");
+    for (const extension of [".exe", ".com"]) {
+      const target = join(packageRoot, "dist", `pi${extension}`);
+      await writeFile(target, "");
+      await writeFile(manifest, `${JSON.stringify({ bin: { pi: `dist/pi${extension}` } })}\n`);
+      expect(resolvePiLaunch(built.deps)).toEqual({
+        executable: realpathSync(target),
+        argvPrefix: [],
+        kind: "package-node-cli",
+      });
+    }
+    for (const extension of [".cmd", ".bat", ".ps1", ".txt"]) {
+      const target = join(packageRoot, "dist", `pi${extension}`);
+      await writeFile(target, "");
+      await writeFile(manifest, `${JSON.stringify({ bin: { pi: `dist/pi${extension}` } })}\n`);
+      expect(() => resolvePiLaunch(built.deps)).toThrow(/extension is unsupported/);
+    }
+  });
+
+  it("rejects malformed manifests, missing bins, and directory targets", async () => {
+    const built = await fixture();
+    const packageRoot = join(
+      built.root,
+      "node_modules",
+      "@earendil-works",
+      "pi-coding-agent",
+    );
+    const manifest = join(packageRoot, "package.json");
+    await writeFile(manifest, "{");
+    expect(() => resolvePiLaunch(built.deps)).toThrow(/manifest JSON is invalid/);
+
+    await writeFile(manifest, "{}\n");
+    expect(() => resolvePiLaunch(built.deps)).toThrow(/bin\.pi is missing or malformed/);
+
+    const directoryTarget = join(packageRoot, "dist", "directory.js");
+    await mkdir(directoryTarget);
+    await writeFile(manifest, `${JSON.stringify({ bin: { pi: "dist/directory.js" } })}\n`);
+    expect(() => resolvePiLaunch(built.deps)).toThrow(/not a regular file/);
+  });
+
   it("binds child stdin EPIPE into the returned completion promise", async () => {
     const child = new FakeChild();
     const stdin = Buffer.from("payload", "utf8");
@@ -165,8 +230,14 @@ describe("Pi launch", () => {
       argvPrefix: ["C:\\pkg\\cli.js"],
       kind: "package-node-cli",
     };
+    const secret = "SECRET_TOKEN_VALUE";
     expect(() =>
-      assertWindowsCommandLineWithinLimit(launch, ["secret".repeat(6000)], "win32", "test-stage"),
+      assertWindowsCommandLineWithinLimit(launch, [secret.repeat(3000)], "win32", "test-stage"),
     ).toThrow(/pi_command_line_too_long: test-stage/);
+    try {
+      assertWindowsCommandLineWithinLimit(launch, [secret.repeat(3000)], "win32", "test-stage");
+    } catch (error) {
+      expect(String(error)).not.toContain(secret);
+    }
   });
 });
