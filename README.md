@@ -31,6 +31,15 @@ npm install @earendil-works/pi-ai @earendil-works/pi-coding-agent
 
 The root export re-exports the complete public runtime surface.
 
+## Strict runtime contracts
+
+- Canonical JSON and JSONL encoders reject values JSON would omit or coerce.
+- Anthropic callers must supply an explicit cache-retention policy and explicit cache capability flags.
+- Anthropic timeout and retry options are enforced; malformed or incomplete SSE sequences settle as errors.
+- Token-family resolution accepts only the frozen calibrated model set. Strict or provable estimation must be selected explicitly for other inputs.
+- Child completion does not succeed until stdin finishes and the child closes; stdin failures reject completion.
+- Parent active-tool exclusion requires the exact tool-call id.
+
 ## Ownership boundary
 
 This package owns mechanisms only. Delegate and Fusion policies, artifact schemas, public tools,

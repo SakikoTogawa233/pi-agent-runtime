@@ -556,8 +556,8 @@ export function resolveCacheRetentionPreference(
 }
 
 function anthropicCompatibility(model: PiModelLike): {
-  supportsLongCacheRetention: boolean | undefined;
-  supportsCacheControlOnTools: boolean | undefined;
+  supportsLongCacheRetention: boolean;
+  supportsCacheControlOnTools: boolean;
 } {
   const compat = model.compat;
   if (!isPlainObject(compat)) throw new Error("Anthropic model compat must be an object");
@@ -573,12 +573,11 @@ function anthropicCompatibility(model: PiModelLike): {
 }
 
 function resolveAnthropicCacheControl(
-  model: PiModelLike | undefined,
+  model: PiModelLike,
   options?: { readonly cacheRetention?: CacheRetention; readonly env?: ProviderEnv },
 ): AnthropicCacheControl | undefined {
   const retention = resolveCacheRetentionPreference(options);
   if (retention === "none") return undefined;
-  if (model === undefined) throw new Error("Anthropic cache control requires a model");
   const supportsLongCacheRetention = anthropicCompatibility(model).supportsLongCacheRetention;
   if (retention === "long" && !supportsLongCacheRetention) {
     throw new Error("Anthropic model does not support requested long cache retention");
@@ -640,19 +639,12 @@ function stripAnthropicSystemPromptBadLines(text: string): string {
     .join("\n");
 }
 
-interface CacheControlInspection {
-  readonly count: number;
-  readonly retention: Exclude<CacheRetention, "none"> | undefined;
-}
-
-function inspectCacheControls(payload: JsonObject): CacheControlInspection {
+function inspectCacheControls(payload: JsonObject): number {
   let count = 0;
-  let hasLong = false;
   const inspectBlock = (block: unknown): void => {
     if (!isPlainObject(block) || block["cache_control"] === undefined) return;
-    const cacheControl = cloneAnthropicCacheControl(block["cache_control"]);
+    cloneAnthropicCacheControl(block["cache_control"]);
     count += 1;
-    if (cacheControl?.ttl === "1h") hasLong = true;
   };
 
   const system = payload["system"];
@@ -676,11 +668,11 @@ function inspectCacheControls(payload: JsonObject): CacheControlInspection {
     }
   }
 
-  return { count, retention: count === 0 ? undefined : hasLong ? "long" : "short" };
+  return count;
 }
 
 function countCacheControlBreakpoints(payload: JsonObject): number {
-  return inspectCacheControls(payload).count;
+  return inspectCacheControls(payload);
 }
 
 function assertCacheControlBreakpointLimit(payload: JsonObject): void {
@@ -843,7 +835,7 @@ export function buildAnthropicAttributionHeaders(
 export function registerAnthropicAttributionProvider(
   pi: ExtensionAPI,
   ctx: AnthropicContextLike,
-  getSessionOverride: () => Exclude<CacheRetention, "none"> | undefined = () => undefined,
+  getSessionOverride: () => Exclude<CacheRetention, "none"> | undefined,
 ): void {
   if (!isAnthropicContext(ctx)) return;
   if (ctx.model === undefined) throw new Error("Anthropic attribution requires an active model");
@@ -1044,7 +1036,7 @@ export function rewriteAnthropicRequestPayload(args: {
   const cacheControl =
     args.cacheRetention === undefined
       ? undefined
-      : resolveAnthropicCacheControl(args.ctx.model, {
+      : resolveAnthropicCacheControl(model, {
           cacheRetention: args.cacheRetention,
         });
 
