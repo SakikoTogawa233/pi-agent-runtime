@@ -211,9 +211,14 @@ describe("Pi launch", () => {
       spawn: () => child as never,
     });
     let settled = false;
-    void capture.completed.finally(() => {
-      settled = true;
-    });
+    void capture.completed.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
 
     child.emit("close", 0, null);
     await Promise.resolve();

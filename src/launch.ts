@@ -277,15 +277,28 @@ export function spawnPiChild(input: SpawnPiChildInput): PiChildCapture {
     stderrChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8"));
   });
   const completed = new Promise<PiChildCompletion>((resolvePromise, reject) => {
-    child.once("error", reject);
-    child.stdin.on("error", reject);
-    child.once("close", (code, signal) => {
+    let stdinFinished = false;
+    let childCompletion: Pick<PiChildCompletion, "code" | "signal"> | undefined;
+    const resolveWhenComplete = (): void => {
+      if (!stdinFinished || childCompletion === undefined) return;
       resolvePromise({
-        code,
-        signal,
+        ...childCompletion,
         stdout: Buffer.concat(stdoutChunks),
         stderr: Buffer.concat(stderrChunks),
       });
+    };
+    child.once("error", reject);
+    child.stdin.on("error", reject);
+    child.stdin.once("finish", () => {
+      stdinFinished = true;
+      resolveWhenComplete();
+    });
+    child.stdin.once("close", () => {
+      if (!stdinFinished) reject(new Error("Pi child stdin closed before the input finished"));
+    });
+    child.once("close", (code, signal) => {
+      childCompletion = { code, signal };
+      resolveWhenComplete();
     });
     child.stdin.end(input.stdin);
   });
