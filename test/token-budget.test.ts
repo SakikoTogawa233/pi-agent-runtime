@@ -3,6 +3,7 @@ import {
   allowedInputTokens,
   estimateInputTokens,
   knownTextSegment,
+  maxKnownTextBytesForTokens,
   resolveTokenBudgetFamily,
   TOKEN_BUDGET_AFFINE_TOKENS,
   unknownOutputContractSegment,
@@ -48,6 +49,105 @@ describe("token estimation", () => {
       unknown_output_contract_bytes: 100,
     });
     expect(estimate.tokens).toBe(616);
+  });
+
+  it("keeps segmentation invariant and freezes dense and multibyte forecasts", () => {
+    const one = estimateInputTokens({
+      family: "openai-codex",
+      profile: "calibrated",
+      allowedInputTokens: 231_040,
+      calibrationBacked: true,
+      familyResolution: "model_override",
+      segments: [
+        {
+          kind: "known_text",
+          bytes: 52_200,
+          multibyteBytes: 0,
+          denseBytes: 0,
+          asciiWhitespaceBytes: 1_000,
+        },
+      ],
+    });
+    const two = estimateInputTokens({
+      family: "openai-codex",
+      profile: "calibrated",
+      allowedInputTokens: 231_040,
+      calibrationBacked: true,
+      familyResolution: "model_override",
+      segments: [
+        {
+          kind: "known_text",
+          bytes: 26_100,
+          multibyteBytes: 0,
+          denseBytes: 0,
+          asciiWhitespaceBytes: 500,
+        },
+        {
+          kind: "known_text",
+          bytes: 26_100,
+          multibyteBytes: 0,
+          denseBytes: 0,
+          asciiWhitespaceBytes: 500,
+        },
+      ],
+    });
+    expect(one.rateSource.source).toBe("calibrated_large_window");
+    expect(two.tokens).toBe(one.tokens);
+    expect(two.rate_buckets).toEqual(one.rate_buckets);
+
+    const dense = estimateInputTokens({
+      family: "openai-codex",
+      profile: "calibrated",
+      allowedInputTokens: 231_040,
+      calibrationBacked: true,
+      familyResolution: "model_override",
+      segments: [knownTextSegment("A".repeat(600_000))],
+    });
+    expect(dense.tokens).toBe(300_512);
+    expect(dense.rateSource.source).toBe("conservative_dense_ascii_whitespace_gate");
+    expect(dense.rateSource.dominant_byte_class).toBe("dense_ascii");
+
+    const multibyte = estimateInputTokens({
+      family: "openai-codex",
+      profile: "calibrated",
+      allowedInputTokens: 231_040,
+      calibrationBacked: true,
+      familyResolution: "model_override",
+      segments: [
+        {
+          kind: "known_text",
+          bytes: 100_000,
+          multibyteBytes: 100_000,
+          denseBytes: 0,
+          asciiWhitespaceBytes: 0,
+        },
+      ],
+    });
+    expect(multibyte.tokens).toBe(50_512);
+    expect(multibyte.advisory.input_tokens_if_multibyte_used_provable_ceiling).toBe(100_512);
+  });
+
+  it("keeps the strict-runtime affine boundary exact", () => {
+    const allowedInputTokens = 100_000;
+    const bytes = maxKnownTextBytesForTokens({
+      family: "openai-codex",
+      allowedInputTokens,
+      profile: "strict-runtime",
+      calibrationBacked: true,
+      familyResolution: "model_override",
+    });
+    expect(bytes).toBe(99_488);
+    const estimate = (size: number) =>
+      estimateInputTokens({
+        family: "openai-codex",
+        profile: "strict-runtime",
+        allowedInputTokens,
+        calibrationBacked: true,
+        familyResolution: "model_override",
+        segments: [knownTextSegment("x".repeat(size))],
+      }).tokens;
+    expect(estimate(bytes)).toBe(allowedInputTokens);
+    expect(estimate(bytes + 1)).toBe(allowedInputTokens + 1);
   });
 
   it("resolves only the frozen backed model set and fails malformed arithmetic loudly", () => {

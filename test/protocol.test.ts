@@ -41,8 +41,11 @@ describe("child protocol framing", () => {
     expect(() => unterminated.finish()).toThrow(/newline-terminated/);
   });
 
-  it("round-trips prefixed frames amid stderr noise and rejects truncated frames", () => {
+  it("round-trips the frozen prefixed bytes amid stderr noise and rejects truncated frames", () => {
     const prefix = "\u001ePI_AGENT_RUNTIME_RESULT ";
+    expect(encodePrefixedJsonFrame(prefix, { ordinal: 1 }).toString("utf8")).toBe(
+      '\u001ePI_AGENT_RUNTIME_RESULT {"ordinal":1}\n',
+    );
     const first = encodePrefixedJsonFrame(prefix, { ordinal: 1 });
     const second = encodePrefixedJsonFrame(prefix, { ordinal: 2 });
     const stderr = Buffer.concat([

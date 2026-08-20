@@ -105,6 +105,30 @@ function callKinds(operations: RecordingOperations): string[] {
 }
 
 describe("durable file writer sequencing", () => {
+  it("keeps the frozen atomic replacement sequence", async () => {
+    const operations = new RecordingOperations();
+    const writer = createDurableFileWriter(operations);
+
+    await writer.replace("/virtual/target.txt", "data");
+
+    expect(callKinds(operations)).toEqual([
+      "openWritable",
+      "writeFile",
+      "syncFile",
+      "closeFile",
+      "rename",
+      "openDirectory",
+      "syncDirectory",
+      "closeDirectory",
+    ]);
+    expect(operations.calls[0]).toEqual({
+      kind: "openWritable",
+      path: "/virtual/target.txt.tmp",
+      flag: "wx",
+      mode: 0o600,
+    });
+  });
+
   it("syncs the containing directory after direct public and private file creation", async () => {
     for (const method of ["write", "writePrivate"] as const) {
       const operations = new RecordingOperations();

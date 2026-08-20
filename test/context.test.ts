@@ -1,5 +1,6 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { canonicalJson } from "../src/canonical.js";
 import { describe, expect, it } from "vitest";
 import {
   projectVisibleConversation,
@@ -99,6 +100,25 @@ describe("visible conversation projection", () => {
     const serialized = JSON.stringify(projected);
     expect(serialized).not.toMatch(/RAW|TOOLRAW|hidden/);
     expect(serialized).not.toContain('"text":"result"');
+  });
+
+  it("is deterministic and changes only omission hashes for equal-length payload mutations", () => {
+    const first = projectVisibleConversation(messages());
+    const repeated = projectVisibleConversation(messages());
+    expect(canonicalJson(first)).toBe(canonicalJson(repeated));
+
+    const mutatedMessages = messages();
+    const toolResult = mutatedMessages[2] as Extract<Message, { role: "toolResult" }>;
+    toolResult.content = [
+      { type: "text", text: "resulx" },
+      { type: "image", mimeType: "image/jpeg", data: "TOOLRAW" },
+    ];
+    const mutated = projectVisibleConversation(mutatedMessages);
+    expect(mutated.accounting.omitted_tool_result_text_bytes).toBe(
+      first.accounting.omitted_tool_result_text_bytes,
+    );
+    expect(mutated.ledger.root_sha256).not.toBe(first.ledger.root_sha256);
+    expect(canonicalJson(mutated)).not.toContain("resulx");
   });
 
   it("fails loudly for an unsupported message block", () => {

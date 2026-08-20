@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,7 +32,7 @@ describe("canonical JSON and SHA-256", () => {
 
   it("matches the frozen SHA-256 vectors", async () => {
     const bytes = Buffer.from("agent-runtime\n", "utf8");
-    const expected = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    const expected = "sha256:7f34e4e81784d50fe4d58698b3d6d044505132f6f763780c2f5623dfce884132";
     expect(sha256Buffer(bytes)).toBe(expected);
     expect(sha256Text("agent-runtime\n")).toBe(expected);
 
