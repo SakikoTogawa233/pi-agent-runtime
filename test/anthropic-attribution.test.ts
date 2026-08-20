@@ -1245,6 +1245,7 @@ describe("Anthropic attribution and sanitization", () => {
     expect(JSON.stringify(rewritten)).not.toContain(badLines[2]);
     expect(JSON.stringify(rewritten)).toContain("keep before\\nkeep after");
     expect(JSON.stringify(rewritten)).toContain("x-anthropic-billing-header:");
+    expect(JSON.stringify(rewritten)).not.toContain("__pi_agent_runtime_anthropic_attribution");
     expect(JSON.stringify(rewritten)).toContain("Claude Agent SDK");
     expect(rewritten.metadata).toEqual({
       user_id: JSON.stringify({
