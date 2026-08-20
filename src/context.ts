@@ -566,7 +566,6 @@ export interface ParentContextSource {
 
 export interface ParentSnapshotOptions {
   toolCallId: string;
-  toolName: string;
   excludeActiveToolCallLeaf: boolean;
 }
 
@@ -582,11 +581,7 @@ function entriesById(entries: readonly SessionEntry[]): Map<string, SessionEntry
   return byId;
 }
 
-function messageContainsToolCall(
-  message: JsonObject,
-  toolCallId: string,
-  toolName: string,
-): boolean {
+function messageContainsToolCall(message: JsonObject, toolCallId: string): boolean {
   if (message["role"] !== "assistant") return false;
   const content = message["content"];
   if (!Array.isArray(content)) {
@@ -618,7 +613,7 @@ export function resolveEffectiveLeaf(
   if (!isJsonObject(leaf.message)) {
     throw new Error("agent runtime parent message leaf must contain a message object");
   }
-  if (messageContainsToolCall(leaf.message, options.toolCallId, options.toolName)) {
+  if (messageContainsToolCall(leaf.message, options.toolCallId)) {
     return { leafId: leaf.parentId, activeToolCallLeafExcluded: true };
   }
   return { leafId: sessionManager.getLeafId(), activeToolCallLeafExcluded: false };

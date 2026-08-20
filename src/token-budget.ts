@@ -377,19 +377,30 @@ function addBreakdown(
 }
 
 function dominantByteClass(breakdown: TokenBudgetByteClassBreakdown): TokenBudgetDominantByteClass {
-  const entries: Array<{ byteClass: TokenBudgetDominantByteClass; bytes: number; order: number }> =
-    [
-      { byteClass: "dense_ascii", bytes: breakdown.dense_bytes, order: 0 },
-      { byteClass: "multibyte", bytes: breakdown.multibyte_bytes, order: 1 },
-      {
-        byteClass: "unknown_output_contract",
-        bytes: breakdown.unknown_output_contract_bytes,
-        order: 2,
-      },
-      { byteClass: "normal", bytes: breakdown.normal_bytes, order: 3 },
-    ];
-  entries.sort((left, right) => right.bytes - left.bytes || left.order - right.order);
-  return entries[0]!.byteClass;
+  type Candidate = { byteClass: TokenBudgetDominantByteClass; bytes: number; order: number };
+  let winner: Candidate = {
+    byteClass: "dense_ascii",
+    bytes: breakdown.dense_bytes,
+    order: 0,
+  };
+  const rest: Candidate[] = [
+    { byteClass: "multibyte", bytes: breakdown.multibyte_bytes, order: 1 },
+    {
+      byteClass: "unknown_output_contract",
+      bytes: breakdown.unknown_output_contract_bytes,
+      order: 2,
+    },
+    { byteClass: "normal", bytes: breakdown.normal_bytes, order: 3 },
+  ];
+  for (const entry of rest) {
+    if (
+      entry.bytes > winner.bytes ||
+      (entry.bytes === winner.bytes && entry.order < winner.order)
+    ) {
+      winner = entry;
+    }
+  }
+  return winner.byteClass;
 }
 
 function profileForSegments(

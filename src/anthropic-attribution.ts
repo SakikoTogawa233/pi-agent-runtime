@@ -790,21 +790,34 @@ export function computeClaudeCodeFingerprint(
 
 function firstUserMessageTextFromPayload(payload: JsonObject): string {
   const messages = payload["messages"];
-  if (!Array.isArray(messages)) return "";
-  for (const message of messages) {
-    if (!isPlainObject(message) || message["role"] !== "user") continue;
-    const content = message["content"];
-    if (typeof content === "string") return content;
-    if (Array.isArray(content)) {
-      const textBlock = content.find(
-        (block) =>
-          isPlainObject(block) && block["type"] === "text" && typeof block["text"] === "string",
-      );
-      if (isPlainObject(textBlock) && typeof textBlock["text"] === "string")
-        return textBlock["text"];
-    }
+  if (!Array.isArray(messages) || messages.length === 0) {
+    throw new Error("Anthropic attribution requires a first user text message");
   }
-  return "";
+  for (const [messageIndex, message] of messages.entries()) {
+    if (!isPlainObject(message)) {
+      throw new Error(`Anthropic attribution payload message ${String(messageIndex)} is malformed`);
+    }
+    if (message["role"] !== "user") continue;
+    const content = message["content"];
+    if (typeof content === "string") {
+      return nonEmptyString(content, "first user text");
+    }
+    if (!Array.isArray(content)) {
+      throw new Error("Anthropic attribution first user content must contain text");
+    }
+    for (const [blockIndex, block] of content.entries()) {
+      if (!isPlainObject(block)) {
+        throw new Error(
+          `Anthropic attribution first user content block ${String(blockIndex)} is malformed`,
+        );
+      }
+      if (block["type"] === "text") {
+        return nonEmptyString(block["text"], "first user text");
+      }
+    }
+    throw new Error("Anthropic attribution requires a first user text message");
+  }
+  throw new Error("Anthropic attribution requires a first user text message");
 }
 
 export function buildClaudeCodeBillingSystemText(firstUserMessageText: string): string {

@@ -148,11 +148,7 @@ describe("parent snapshot", () => {
           getLeafEntry: () => undefined,
           getEntries: () => [],
         },
-        {
-          toolCallId: undefined as never,
-          toolName: "subagent_run",
-          excludeActiveToolCallLeaf: true,
-        },
+        { toolCallId: undefined as never, excludeActiveToolCallLeaf: true },
       ),
     ).toThrow(/toolCallId/);
   });
@@ -166,7 +162,7 @@ describe("parent snapshot", () => {
             ({ id: "leaf", parentId: null, type: "message", message: null }) as never,
           getEntries: () => [],
         },
-        { toolCallId: "active", toolName: "subagent_run", excludeActiveToolCallLeaf: true },
+        { toolCallId: "active", excludeActiveToolCallLeaf: true },
       ),
     ).toThrow(/message leaf/i);
   });
@@ -191,7 +187,7 @@ describe("parent snapshot", () => {
 
     const snapshot = snapshotParentConversation(
       { cwd: "/tmp/project", sessionManager: session, getSystemPrompt: () => "system" },
-      { toolCallId: "active", toolName: "subagent_run", excludeActiveToolCallLeaf: true },
+      { toolCallId: "active", excludeActiveToolCallLeaf: true },
     );
     expect(snapshot.activeToolCallLeafExcluded).toBe(true);
     expect(JSON.stringify(snapshot.messages)).toContain("root question");
