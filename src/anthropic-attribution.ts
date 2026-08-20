@@ -525,7 +525,7 @@ function providerEnvValue(name: string, env?: ProviderEnv): string | undefined {
   return env?.[name] ?? process.env[name];
 }
 
-function parseCacheRetention(value: string, source: string): CacheRetention {
+function parseCacheRetention(value: unknown, source: string): CacheRetention {
   if (value === "none" || value === "short" || value === "long") return value;
   throw new Error(
     `Anthropic attribution ${source} must be one of none, short, or long; got ${JSON.stringify(value)}`,
@@ -545,8 +545,9 @@ export function resolveCacheRetentionPreference(
   },
   sessionOverride?: Exclude<CacheRetention, "none">,
 ): CacheRetention {
-  if (options?.cacheRetention !== undefined) return options.cacheRetention;
-  if (sessionOverride !== undefined) return sessionOverride;
+  if (options?.cacheRetention !== undefined)
+    return parseCacheRetention(options.cacheRetention, "cacheRetention");
+  if (sessionOverride !== undefined) return parseCacheRetention(sessionOverride, "session override");
   const configured = providerEnvValue(CACHE_RETENTION_ENV, options?.env);
   if (configured !== undefined) return parseCacheRetention(configured, CACHE_RETENTION_ENV);
   return "long";
@@ -1075,21 +1076,57 @@ function sanitizeSurrogates(text: string): string {
   return text.replace(/[\uD800-\uDFFF]/g, "\uFFFD");
 }
 
-function convertContentBlocks(content: readonly PiContentBlock[]): string | JsonObject[] {
-  const hasImages = content.some((block) => block.type === "image");
-  if (!hasImages)
-    return sanitizeSurrogates(
-      content.map((block) => (block.type === "text" ? block.text : "")).join("\n"),
+function nonEmptyString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`Anthropic attribution ${label} must be a non-empty string`);
+  }
+  return value;
+}
+
+function convertContentBlocks(content: unknown, label: string): string | JsonObject[] {
+  if (!Array.isArray(content) || content.length === 0) {
+    throw new Error(`Anthropic attribution ${label} must be a non-empty content block array`);
+  }
+  const blocks: JsonObject[] = [];
+  let hasImages = false;
+  for (const [index, rawBlock] of content.entries()) {
+    if (!isPlainObject(rawBlock)) {
+      throw new Error(`Anthropic attribution ${label}[${String(index)}] must be a content block`);
+    }
+    if (rawBlock["type"] === "text") {
+      blocks.push({
+        type: "text",
+        text: sanitizeSurrogates(
+          nonEmptyString(rawBlock["text"], `${label}[${String(index)}].text`),
+        ),
+      });
+      continue;
+    }
+    if (rawBlock["type"] === "image") {
+      hasImages = true;
+      blocks.push({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: nonEmptyString(
+            rawBlock["mimeType"],
+            `${label}[${String(index)}].mimeType`,
+          ),
+          data: nonEmptyString(rawBlock["data"], `${label}[${String(index)}].data`),
+        },
+      });
+      continue;
+    }
+    throw new Error(
+      `Anthropic attribution ${label}[${String(index)}] has unsupported content block type ${String(rawBlock["type"])}`,
     );
-  const blocks = content.map((block) => {
-    if (block.type === "text") return { type: "text", text: sanitizeSurrogates(block.text) };
-    return {
-      type: "image",
-      source: { type: "base64", media_type: block.mimeType, data: block.data },
-    };
-  });
-  if (!blocks.some((block) => block.type === "text"))
+  }
+  if (!hasImages) {
+    return blocks.map((block) => block["text"] as string).join("\n");
+  }
+  if (!blocks.some((block) => block["type"] === "text")) {
     blocks.unshift({ type: "text", text: "(see attached image)" });
+  }
   return blocks;
 }
 
@@ -1143,94 +1180,128 @@ function markLastConversationCacheSurface(
   return output;
 }
 
+function convertAssistantBlocks(content: unknown, messageIndex: number): JsonObject[] {
+  if (!Array.isArray(content) || content.length === 0) {
+    throw new Error(
+      `Anthropic attribution assistant message ${String(messageIndex)} must have content blocks`,
+    );
+  }
+  const converted: JsonObject[] = [];
+  for (const [blockIndex, rawBlock] of content.entries()) {
+    if (!isPlainObject(rawBlock)) {
+      throw new Error(
+        `Anthropic attribution assistant message ${String(messageIndex)} content block ${String(blockIndex)} must be an object`,
+      );
+    }
+    const label = `assistant message ${String(messageIndex)} content block ${String(blockIndex)}`;
+    if (rawBlock["type"] === "text") {
+      converted.push({
+        type: "text",
+        text: sanitizeSurrogates(nonEmptyString(rawBlock["text"], `${label}.text`)),
+      });
+      continue;
+    }
+    if (rawBlock["type"] === "thinking") {
+      const thinkingSignature = nonEmptyString(
+        rawBlock["thinkingSignature"],
+        `${label}.thinkingSignature`,
+      );
+      if (rawBlock["redacted"] === true) {
+        converted.push({ type: "redacted_thinking", data: thinkingSignature });
+      } else {
+        converted.push({
+          type: "thinking",
+          thinking: sanitizeSurrogates(nonEmptyString(rawBlock["thinking"], `${label}.thinking`)),
+          signature: thinkingSignature,
+        });
+      }
+      continue;
+    }
+    if (rawBlock["type"] === "toolCall") {
+      if (!isPlainObject(rawBlock["arguments"])) {
+        throw new Error(`Anthropic attribution ${label}.arguments must be an object`);
+      }
+      converted.push({
+        type: "tool_use",
+        id: nonEmptyString(rawBlock["id"], `${label}.id`),
+        name: nonEmptyString(rawBlock["name"], `${label}.name`),
+        input: rawBlock["arguments"],
+      });
+      continue;
+    }
+    throw new Error(
+      `Anthropic attribution assistant message ${String(messageIndex)} has unsupported content block type ${String(rawBlock["type"])}`,
+    );
+  }
+  return converted;
+}
+
+function convertToolResultMessage(message: JsonObject, messageIndex: number): JsonObject {
+  const isError = message["isError"];
+  if (isError !== undefined && typeof isError !== "boolean") {
+    throw new Error(
+      `Anthropic attribution tool result message ${String(messageIndex)}.isError must be boolean`,
+    );
+  }
+  return {
+    type: "tool_result",
+    tool_use_id: nonEmptyString(
+      message["toolCallId"],
+      `tool result message ${String(messageIndex)}.toolCallId`,
+    ),
+    content: convertContentBlocks(
+      message["content"],
+      `tool result message ${String(messageIndex)}.content`,
+    ),
+    is_error: isError === true,
+  };
+}
+
 function convertMessages(
   messages: readonly PiMessage[],
   cacheControl?: AnthropicCacheControl,
 ): JsonObject[] {
   const params: JsonObject[] = [];
   for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (message === undefined) {
-      throw new TypeError(`Anthropic message ${index} is missing`);
+    const rawMessage: unknown = messages[index];
+    if (!isPlainObject(rawMessage)) {
+      throw new Error(`Anthropic attribution message ${String(index)} must be an object`);
     }
-    if (message.role === "user") {
-      if (typeof message.content === "string") {
-        if (message.content.trim().length > 0)
-          params.push({ role: "user", content: sanitizeSurrogates(message.content) });
-      } else {
-        const content = message.content
-          .map((block) =>
-            block.type === "text"
-              ? { type: "text", text: sanitizeSurrogates(block.text) }
-              : {
-                  type: "image",
-                  source: { type: "base64", media_type: block.mimeType, data: block.data },
-                },
-          )
-          .filter((block) => block.type !== "text" || String(block.text).trim().length > 0);
-        if (content.length > 0) params.push({ role: "user", content });
-      }
-    } else if (message.role === "assistant") {
-      const content: JsonObject[] = [];
-      for (const block of message.content) {
-        if (
-          block["type"] === "text" &&
-          typeof block["text"] === "string" &&
-          block["text"].trim().length > 0
-        ) {
-          content.push({ type: "text", text: sanitizeSurrogates(block["text"]) });
-        } else if (
-          block["type"] === "thinking" &&
-          typeof block["thinking"] === "string" &&
-          block["thinking"].trim().length > 0
-        ) {
-          const signature =
-            typeof block["thinkingSignature"] === "string" ? block["thinkingSignature"] : "";
-          content.push(
-            signature.length > 0
-              ? { type: "thinking", thinking: sanitizeSurrogates(block["thinking"]), signature }
-              : { type: "text", text: sanitizeSurrogates(block["thinking"]) },
-          );
-        } else if (
-          block["type"] === "toolCall" &&
-          typeof block["id"] === "string" &&
-          typeof block["name"] === "string"
-        ) {
-          if (!isPlainObject(block["arguments"])) {
-            throw new Error("Anthropic attribution requires tool-call arguments to be an object");
-          }
-          content.push({
-            type: "tool_use",
-            id: block["id"],
-            name: block["name"],
-            input: block["arguments"],
-          });
-        }
-      }
-      if (content.length > 0) params.push({ role: "assistant", content });
-    } else if (message.role === "toolResult") {
-      const toolResults: JsonObject[] = [
-        {
-          type: "tool_result",
-          tool_use_id: message.toolCallId,
-          content: convertContentBlocks(message.content),
-          is_error: message.isError === true,
-        },
-      ];
+    const role = rawMessage["role"];
+    if (role === "user") {
+      const content = rawMessage["content"];
+      params.push({
+        role: "user",
+        content:
+          typeof content === "string"
+            ? sanitizeSurrogates(nonEmptyString(content, `user message ${String(index)}.content`))
+            : convertContentBlocks(content, `user message ${String(index)}.content`),
+      });
+      continue;
+    }
+    if (role === "assistant") {
+      params.push({ role: "assistant", content: convertAssistantBlocks(rawMessage["content"], index) });
+      continue;
+    }
+    if (role === "toolResult") {
+      const toolResults = [convertToolResultMessage(rawMessage, index)];
       let lookahead = index + 1;
-      while (lookahead < messages.length && messages[lookahead]?.role === "toolResult") {
-        const next = messages[lookahead] as Extract<PiMessage, { role: "toolResult" }>;
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: next.toolCallId,
-          content: convertContentBlocks(next.content),
-          is_error: next.isError === true,
-        });
+      while (lookahead < messages.length) {
+        const next: unknown = messages[lookahead];
+        if (!isPlainObject(next) || next["role"] !== "toolResult") break;
+        toolResults.push(convertToolResultMessage(next, lookahead));
         lookahead += 1;
       }
       index = lookahead - 1;
       params.push({ role: "user", content: toolResults });
+      continue;
     }
+    throw new Error(
+      `Anthropic attribution message role ${String(role)} at index ${String(index)} is unsupported`,
+    );
+  }
+  if (params.length === 0) {
+    throw new Error("Anthropic attribution requires at least one message");
   }
   return markLastConversationCacheSurface(params, cacheControl);
 }
