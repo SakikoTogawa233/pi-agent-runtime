@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { type ProviderConfig, SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ANTHROPIC_ATTRIBUTION_CLAIM_CHANNEL,
@@ -750,6 +750,96 @@ describe("Anthropic beta messages transport", () => {
     expect(nonRetryable).toHaveBeenCalledTimes(1);
     expect(rejected.stopReason).toBe("error");
     expect(rejected.errorMessage).toMatch(/HTTP 400/);
+  });
+
+  it("preserves the registered host endpoint, headers, null suppression, and fetch", async () => {
+    const globalFetch = vi.fn(() => {
+      throw new Error("global fetch must not be used");
+    });
+    vi.stubGlobal("fetch", globalFetch);
+    const customFetch = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        expect(String(input)).toBe(
+          "https://gateway.example.test/anthropic/v1/messages?beta=true",
+        );
+        const headers = new Headers(init?.headers);
+        expect(Object.fromEntries(headers.entries())).toMatchObject({
+          accept: "application/vnd.pi+json",
+          authorization: "Bearer sk-ant-oat-test-token",
+          "content-type": "application/json",
+          "user-agent": "pi-host-agent/0.84.2",
+          "x-host-header": "host",
+          "x-model-header": "model",
+          "x-shared-header": "host",
+        });
+        expect(headers.has("x-removed-header")).toBe(false);
+        return new Response(successfulSse("custom transport"), { status: 200 });
+      },
+    );
+    const bus = new SynchronousBus();
+    const registered = recordingHost(bus);
+    createAnthropicAttributionExtension({
+      loadAccount: () => ({ deviceId: "device", accountUuid: "account" }),
+    })(registered.host);
+    const provider = registered.providers[0] as ProviderConfig;
+    const model: PiModelLike = {
+      ...anthropicModel,
+      baseUrl: "https://gateway.example.test/anthropic/",
+      headers: {
+        "X-Model-Header": "model",
+        "X-Shared-Header": "model",
+        "X-Removed-Header": "model",
+      },
+    };
+
+    const result = await provider
+      .streamSimple?.(
+        model,
+        userContext(),
+        streamOptions({
+          fetch: customFetch,
+          headers: {
+            Accept: "application/vnd.pi+json",
+            Authorization: "Bearer sk-ant-oat-test-token",
+            "User-Agent": "pi-host-agent/0.84.2",
+            "X-Host-Header": "host",
+            "X-Shared-Header": "host",
+            "X-Removed-Header": null,
+          },
+        }),
+      )
+      .result();
+
+    expect(result).toMatchObject({
+      stopReason: "stop",
+      content: [{ type: "text", text: "custom transport" }],
+    });
+    expect(customFetch).toHaveBeenCalledTimes(1);
+    expect(globalFetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing routing and suppressed OAuth authorization before fetch", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(successfulSse(), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    for (const baseUrl of [undefined, ""] as const) {
+      const result = await streamAnthropicViaBetaMessages(
+        { ...anthropicModel, baseUrl } as PiModelLike,
+        userContext(),
+        streamOptions(),
+      ).result();
+      expect(result.stopReason).toBe("error");
+      expect(result.errorMessage).toMatch(/baseUrl.*required/i);
+    }
+
+    const missingAuthorization = await streamAnthropicViaBetaMessages(
+      anthropicModel,
+      userContext(),
+      streamOptions({ headers: { Authorization: null } }),
+    ).result();
+    expect(missingAuthorization.stopReason).toBe("error");
+    expect(missingAuthorization.errorMessage).toMatch(/Authorization.*required/i);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("enforces timeoutMs on the request instead of leaving it inert", async () => {
