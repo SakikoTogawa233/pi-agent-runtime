@@ -328,8 +328,8 @@ function parseCacheRetention(value: unknown, source: string): CacheRetention {
 /**
  * Resolve retention without allowing the extension default to override an
  * explicit call-level posture (notably Pi's cacheRetention=none compaction calls).
- * Precedence: request option -> persisted session override -> process/provider env
- * -> the repo policy default of one hour.
+ * Precedence: request option -> persisted session override -> process/provider env.
+ * If all are absent, the caller has not supplied policy and the runtime rejects.
  */
 export function resolveCacheRetentionPreference(
   options?: {
