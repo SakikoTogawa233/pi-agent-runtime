@@ -4,6 +4,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   assertPathContained,
+  createDurableFileWriter,
+  DurableFileError,
+  type DurableData,
+  type DurableDirectoryHandle,
+  type DurableFileOperations,
+  type DurableWritableHandle,
+  type DurableWriteFlag,
   pathInside,
   replacePrivateFileDurable,
   resolveContainedPath,
@@ -23,6 +30,130 @@ async function tempDir(): Promise<string> {
   tempDirectories.push(dir);
   return dir;
 }
+
+type RecordedCall =
+  | { kind: "openWritable"; path: string; flag: DurableWriteFlag; mode: number | undefined }
+  | { kind: "writeFile"; path: string; data: DurableData }
+  | {
+      kind:
+        | "syncFile"
+        | "closeFile"
+        | "openDirectory"
+        | "syncDirectory"
+        | "closeDirectory";
+      path: string;
+    }
+  | { kind: "rename"; source: string; target: string }
+  | { kind: "remove"; path: string };
+
+class RecordingOperations implements DurableFileOperations {
+  readonly platform: NodeJS.Platform;
+  readonly calls: RecordedCall[] = [];
+  syncDirectoryError: Error | undefined;
+
+  constructor(platform: NodeJS.Platform = "linux") {
+    this.platform = platform;
+  }
+
+  async openWritable(
+    path: string,
+    flag: DurableWriteFlag,
+    mode?: number,
+  ): Promise<DurableWritableHandle> {
+    this.calls.push({ kind: "openWritable", path, flag, mode });
+    return {
+      writeFile: async (data) => {
+        this.calls.push({ kind: "writeFile", path, data });
+      },
+      sync: async () => {
+        this.calls.push({ kind: "syncFile", path });
+      },
+      close: async () => {
+        this.calls.push({ kind: "closeFile", path });
+      },
+    };
+  }
+
+  async openDirectory(path: string): Promise<DurableDirectoryHandle> {
+    this.calls.push({ kind: "openDirectory", path });
+    return {
+      sync: async () => {
+        this.calls.push({ kind: "syncDirectory", path });
+        if (this.syncDirectoryError !== undefined) throw this.syncDirectoryError;
+      },
+      close: async () => {
+        this.calls.push({ kind: "closeDirectory", path });
+      },
+    };
+  }
+
+  async rename(source: string, target: string): Promise<void> {
+    this.calls.push({ kind: "rename", source, target });
+  }
+
+  async remove(path: string): Promise<void> {
+    this.calls.push({ kind: "remove", path });
+  }
+
+  temporaryPath(target: string): string {
+    return `${target}.tmp`;
+  }
+}
+
+function callKinds(operations: RecordingOperations): string[] {
+  return operations.calls.map((call) => call.kind);
+}
+
+describe("durable file writer sequencing", () => {
+  it("syncs the containing directory after direct public and private file creation", async () => {
+    for (const method of ["write", "writePrivate"] as const) {
+      const operations = new RecordingOperations();
+      const writer = createDurableFileWriter(operations);
+
+      await writer[method]("/virtual/created.txt", "data");
+
+      expect(callKinds(operations)).toEqual([
+        "openWritable",
+        "writeFile",
+        "syncFile",
+        "closeFile",
+        "openDirectory",
+        "syncDirectory",
+        "closeDirectory",
+      ]);
+    }
+  });
+
+  it("reports direct-create directory sync failure instead of claiming durability", async () => {
+    const operations = new RecordingOperations();
+    operations.syncDirectoryError = new Error("directory sync failed");
+    const writer = createDurableFileWriter(operations);
+
+    await expect(writer.writePrivate("/virtual/created.txt", "data")).rejects.toMatchObject({
+      operation: "sync_directory",
+      path: "/virtual",
+      renameCompleted: false,
+    } satisfies Partial<DurableFileError>);
+    expect(callKinds(operations)).toEqual([
+      "openWritable",
+      "writeFile",
+      "syncFile",
+      "closeFile",
+      "openDirectory",
+      "syncDirectory",
+      "closeDirectory",
+    ]);
+  });
+
+  it("keeps the Windows direct-write sequence handle-scoped", async () => {
+    const operations = new RecordingOperations("win32");
+    const writer = createDurableFileWriter(operations);
+
+    await writer.writePrivate("C:\\virtual\\created.txt", "data");
+
+    expect(callKinds(operations)).toEqual(["openWritable", "writeFile", "syncFile", "closeFile"]);
+  });
+});
 
 describe("private durable files", () => {
   it("creates private files and atomically replaces them without temp residue", async () => {

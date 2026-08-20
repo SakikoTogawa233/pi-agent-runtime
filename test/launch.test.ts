@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   assertWindowsCommandLineWithinLimit,
@@ -44,6 +45,20 @@ async function fixture(): Promise<{ root: string; cli: string; deps: PiLaunchDep
       stat: statSync,
     },
   };
+}
+
+class FakeStdin extends EventEmitter {
+  endedWith: Buffer | undefined;
+
+  end(data: Buffer): void {
+    this.endedWith = data;
+  }
+}
+
+class FakeChild extends EventEmitter {
+  readonly stdin = new FakeStdin();
+  readonly stdout = new EventEmitter();
+  readonly stderr = new EventEmitter();
 }
 
 describe("Pi launch", () => {
@@ -109,6 +124,26 @@ describe("Pi launch", () => {
     const source = await readFile(new URL("../src/launch.ts", import.meta.url), "utf8");
     expect(source).not.toContain("createRequire");
     expect(source).not.toContain("package entry resolve failed");
+  });
+
+  it("binds child stdin EPIPE into the returned completion promise", async () => {
+    const child = new FakeChild();
+    const stdin = Buffer.from("payload", "utf8");
+    const capture = spawnPiChild({
+      launch: { executable: "pi", argvPrefix: [], kind: "path" },
+      piArgs: [],
+      stdin,
+      spawnOptions: {},
+      platform: "linux",
+      spawn: () => child as never,
+    });
+
+    expect(child.stdin.endedWith).toBe(stdin);
+    expect(child.stdin.listenerCount("error")).toBe(1);
+    const failure = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+    child.stdin.emit("error", failure);
+    child.emit("close", 1, null);
+    await expect(capture.completed).rejects.toBe(failure);
   });
 
   it("rejects escaped package bins and oversized Windows command lines loudly", async () => {
