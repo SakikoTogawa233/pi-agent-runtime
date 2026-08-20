@@ -29,6 +29,7 @@ const anthropicModel: PiModelLike = {
   maxTokens: 64_000,
   reasoning: true,
   compat: { supportsLongCacheRetention: true, supportsCacheControlOnTools: true },
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 };
 
 const pricedAnthropicModel: PiModelLike = {
@@ -101,7 +102,7 @@ function recordingHost(bus: SynchronousBus): {
 }
 
 describe("Anthropic request contracts", () => {
-  it("requires an explicit cache policy and explicit model capabilities", () => {
+  it("requires an explicit cache policy and accepts omitted host capability booleans", () => {
     expect(() => resolveCacheRetentionPreference({ env: {} })).toThrow(
       /cache retention.*required/i,
     );
@@ -111,7 +112,7 @@ describe("Anthropic request contracts", () => {
         { messages: [{ role: "user", content: "hello" }] },
         { cacheRetention: "short" },
       ),
-    ).toThrow(/compat/);
+    ).not.toThrow();
     expect(() =>
       buildAnthropicRequestParams(
         {
@@ -374,8 +375,40 @@ describe("Anthropic request contracts", () => {
   });
 });
 
-function sseEvent(event: string, data: unknown): string {
+const messageStartUsage = {
+  input_tokens: 1,
+  output_tokens: 0,
+  cache_read_input_tokens: 0,
+  cache_creation_input_tokens: 0,
+  cache_creation: { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 0 },
+};
+const messageDeltaUsage = {
+  input_tokens: 1,
+  output_tokens: 1,
+  cache_read_input_tokens: 0,
+  cache_creation_input_tokens: 0,
+};
+
+function rawSseEvent(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+function sseEvent(event: string, data: unknown): string {
+  if (event === "message_start") {
+    const payload = data as { message: Record<string, unknown> } & Record<string, unknown>;
+    return rawSseEvent(event, {
+      ...payload,
+      message: {
+        ...payload.message,
+        usage: payload.message.usage ?? messageStartUsage,
+      },
+    });
+  }
+  if (event === "message_delta") {
+    const payload = data as Record<string, unknown>;
+    return rawSseEvent(event, { ...payload, usage: payload.usage ?? messageDeltaUsage });
+  }
+  return rawSseEvent(event, data);
 }
 
 function successfulSse(text = "hello"): string {
@@ -500,6 +533,84 @@ describe("Anthropic beta messages transport", () => {
       const result = await streamedResult(body);
       expect(result.stopReason).toBe("error");
       expect(result.errorMessage).toMatch(/SSE|sequence|response id|content block/i);
+    }
+  });
+
+  it("requires host usage objects while accepting nullable no-cache fields", async () => {
+    const nullableNoCacheUsage = [
+      sseEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg-1",
+          usage: {
+            input_tokens: 11,
+            output_tokens: 0,
+            cache_read_input_tokens: null,
+            cache_creation_input_tokens: null,
+            cache_creation: null,
+          },
+        },
+      }),
+      sseEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: {
+          input_tokens: null,
+          output_tokens: 7,
+          cache_read_input_tokens: null,
+          cache_creation_input_tokens: null,
+        },
+      }),
+      sseEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(nullableNoCacheUsage, { status: 200 })),
+    );
+    await expect(
+      streamAnthropicViaBetaMessages(
+        pricedAnthropicModel,
+        { messages: [{ role: "user", content: "hello" }] },
+        streamOptions(),
+      ).result(),
+    ).resolves.toMatchObject({
+      stopReason: "stop",
+      usage: { input: 11, output: 7, cacheRead: 0, cacheWrite: 0, totalTokens: 18 },
+    });
+
+    const missingUsageBodies = [
+      [
+        rawSseEvent("message_start", {
+          type: "message_start",
+          message: { id: "msg-1" },
+        }),
+        sseEvent("message_delta", {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn" },
+        }),
+        sseEvent("message_stop", { type: "message_stop" }),
+      ].join(""),
+      [
+        sseEvent("message_start", {
+          type: "message_start",
+          message: { id: "msg-1" },
+        }),
+        rawSseEvent("message_delta", {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn" },
+        }),
+        sseEvent("message_stop", { type: "message_stop" }),
+      ].join(""),
+    ];
+    for (const body of missingUsageBodies) {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(body, { status: 200 })));
+      const result = await streamAnthropicViaBetaMessages(
+        pricedAnthropicModel,
+        { messages: [{ role: "user", content: "hello" }] },
+        streamOptions(),
+      ).result();
+      expect(result.stopReason).toBe("error");
+      expect(result.errorMessage).toMatch(/usage.*required/i);
     }
   });
 
