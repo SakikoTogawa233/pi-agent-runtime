@@ -740,6 +740,53 @@ describe("Anthropic beta messages transport", () => {
     expect(result).toMatchObject({ stopReason: "stop", content: [{ text: "retried" }] });
   });
 
+  it("honors maxRetryDelayMs and keeps custom fetch across retries", async () => {
+    const globalFetch = vi.fn(() => {
+      throw new Error("global fetch must not be used");
+    });
+    vi.stubGlobal("fetch", globalFetch);
+    const cappedFetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response("busy", {
+          status: 503,
+          statusText: "Unavailable",
+          headers: { "retry-after": "2" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(successfulSse("must not retry"), { status: 200 }));
+    const capped = await streamAnthropicViaBetaMessages(
+      anthropicModel,
+      userContext(),
+      streamOptions({ fetch: cappedFetch, maxRetries: 1, maxRetryDelayMs: 100 }),
+    ).result();
+    expect(capped.stopReason).toBe("error");
+    expect(capped.errorMessage).toMatch(/Server requested 2s retry delay.*max.*1s/i);
+    expect(cappedFetch).toHaveBeenCalledTimes(1);
+
+    const retryingFetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response("busy", {
+          status: 503,
+          statusText: "Unavailable",
+          headers: { "retry-after-ms": "0" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(successfulSse("custom retried"), { status: 200 }));
+    const retried = await streamAnthropicViaBetaMessages(
+      anthropicModel,
+      userContext(),
+      streamOptions({ fetch: retryingFetch, maxRetries: 1, maxRetryDelayMs: 100 }),
+    ).result();
+    expect(retried).toMatchObject({
+      stopReason: "stop",
+      content: [{ type: "text", text: "custom retried" }],
+    });
+    expect(retryingFetch).toHaveBeenCalledTimes(2);
+    expect(globalFetch).not.toHaveBeenCalled();
+  });
+
   it("exhausts retryable failures and never retries a non-retryable response", async () => {
     const retryable = vi
       .fn()
