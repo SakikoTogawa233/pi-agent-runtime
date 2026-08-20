@@ -2136,9 +2136,11 @@ export function createAnthropicAttributionExtension(
       throw new Error("Anthropic attribution ownership is already claimed");
     }
 
+    const streamSimple: HostStreamSimple = (model, context, streamOptions) =>
+      streamAnthropicViaBetaMessages(requireAnthropicModel(model), context, streamOptions);
     pi.registerProvider("anthropic", {
       api: "anthropic-messages",
-      streamSimple: streamAnthropicViaBetaMessages as unknown as HostStreamSimple,
+      streamSimple,
     });
 
     pi.on("before_provider_request", (event, ctx) => {
