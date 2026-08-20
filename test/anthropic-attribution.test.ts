@@ -878,6 +878,72 @@ describe("Anthropic beta messages transport", () => {
     expect(result.errorMessage).toMatch(/timed out after 5 ms/);
   });
 
+  it("revalidates attribution invariants after onPayload replacement", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(successfulSse(), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const cases: Array<{
+      readonly label: string;
+      readonly replace: (payload: Record<string, unknown>) => Record<string, unknown>;
+      readonly error: RegExp;
+      readonly maxTokens?: number;
+    }> = [
+      {
+        label: "changed caller maxTokens",
+        maxTokens: 2048,
+        replace: (payload) => ({ ...payload, max_tokens: 1024 }),
+        error: /max_tokens.*2048/,
+      },
+      {
+        label: "thinking budget at the output ceiling",
+        replace: (payload) => ({
+          ...payload,
+          thinking: { type: "enabled", budget_tokens: payload.max_tokens },
+        }),
+        error: /thinking\.budget_tokens.*max_tokens/,
+      },
+      {
+        label: "excess cache breakpoints",
+        replace: (payload) => ({
+          ...payload,
+          system: Array.from({ length: 5 }, (_unused, index) => ({
+            type: "text",
+            text: `hook-system-${String(index)}`,
+            cache_control: { type: "ephemeral" },
+          })),
+        }),
+        error: /at most 4/,
+      },
+      {
+        label: "unpaired surrogate",
+        replace: (payload) => ({ ...payload, hook_text: String.fromCharCode(0xd800) }),
+        error: /unpaired surrogate/i,
+      },
+      {
+        label: "changed model",
+        replace: (payload) => ({ ...payload, model: "claude-opus-5" }),
+        error: /payload model.*claude-sonnet-4-5/,
+      },
+    ];
+
+    for (const testCase of cases) {
+      const result = await streamAnthropicViaBetaMessages(
+        anthropicModel,
+        userContext(),
+        streamOptions({
+          maxTokens: testCase.maxTokens,
+          onPayload: (payload) =>
+            testCase.replace({
+              ...(payload as Record<string, unknown>),
+              metadata: { user_id: JSON.stringify({ session_id: TEST_SESSION_ID }) },
+            }),
+        }),
+      ).result();
+      expect(result.stopReason, testCase.label).toBe("error");
+      expect(result.errorMessage, testCase.label).toMatch(testCase.error);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("rejects an onPayload result containing unsupported JSON before fetch", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
