@@ -1166,19 +1166,24 @@ function thinkingBudgetFor(
 }
 
 function adaptiveEffortFor(
+  model: PiModelLike,
   level: NonNullable<PiSimpleStreamOptions["reasoning"]>,
-): "low" | "medium" | "high" | "xhigh" | "max" {
+): string {
+  const mapped = model.thinkingLevelMap?.[level];
+  if (typeof mapped === "string") return mapped;
+  if (mapped === null) {
+    throw new Error(`Anthropic attribution model does not support reasoning=${level}`);
+  }
   switch (level) {
+    case "minimal":
     case "low":
+      return "low";
     case "medium":
+      return "medium";
     case "high":
     case "xhigh":
     case "max":
-      return level;
-    case "minimal":
-      throw new Error(
-        "Anthropic attribution cannot map Pi reasoning=minimal to Claude adaptive effort; use low, medium, high, xhigh, or max",
-      );
+      return "high";
   }
 }
 
@@ -1233,7 +1238,7 @@ export function buildAnthropicRequestParams(
   if (model.reasoning && reasoning !== undefined) {
     if (policy.thinkingPolicy === "adaptive-effort") {
       params["thinking"] = { type: "adaptive" };
-      params["output_config"] = { effort: adaptiveEffortFor(reasoning) };
+      params["output_config"] = { effort: adaptiveEffortFor(model, reasoning) };
     } else {
       params["thinking"] = {
         type: "enabled",
