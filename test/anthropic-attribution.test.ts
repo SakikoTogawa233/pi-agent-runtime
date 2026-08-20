@@ -1090,7 +1090,7 @@ describe("Anthropic beta messages transport", () => {
             cache_control: { type: "ephemeral" },
           })),
         }),
-        error: /at most 4|system identity/,
+        error: /at most 4|system identity|billing identity/,
       },
       {
         label: "unpaired surrogate",

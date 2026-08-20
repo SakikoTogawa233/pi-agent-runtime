@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,10 @@ import type {
   ToolCall,
 } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream, hasApi } from "@earendil-works/pi-ai";
+import {
+  getJsonSchemaToolParameters,
+  resolveJsonSchemaStrictSampling,
+} from "@earendil-works/pi-ai/api/constrained-sampling";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -89,6 +93,70 @@ export const ANTHROPIC_ATTRIBUTION_CLAIM_CHANNEL =
 const ANTHROPIC_ATTRIBUTION_CLAIM_SCHEMA = "pi-agent-runtime.anthropic-attribution.claim.v1";
 const NATIVE_ATTESTATION_PLACEHOLDER = "00000";
 const ANTHROPIC_CACHE_CONTROL_BREAKPOINT_LIMIT = 4;
+const ANTHROPIC_ATTRIBUTION_PROOF_KEY = "__pi_agent_runtime_anthropic_attribution_v1";
+const ANTHROPIC_ATTRIBUTION_PROOF_SECRET = randomBytes(32);
+
+interface ExpectedAnthropicAttribution {
+  readonly accountUuid: string;
+  readonly deviceId: string;
+  readonly sessionId: string;
+  readonly billingSystemText: string;
+  readonly identityBlocks: readonly [JsonObject, JsonObject];
+}
+
+function encodeAnthropicAttributionProof(expected: ExpectedAnthropicAttribution): string {
+  const payload = Buffer.from(JSON.stringify(expected), "utf8").toString("base64url");
+  const signature = createHmac("sha256", ANTHROPIC_ATTRIBUTION_PROOF_SECRET)
+    .update(payload)
+    .digest("base64url");
+  return `${payload}.${signature}`;
+}
+
+function decodeAnthropicAttributionProof(value: unknown): ExpectedAnthropicAttribution {
+  if (typeof value !== "string") {
+    throw new Error("Anthropic attribution payload is missing expected attribution proof");
+  }
+  const separator = value.indexOf(".");
+  if (separator <= 0 || separator !== value.lastIndexOf(".")) {
+    throw new Error("Anthropic attribution payload contains malformed attribution proof");
+  }
+  const payload = value.slice(0, separator);
+  const signature = value.slice(separator + 1);
+  const expectedSignature = createHmac("sha256", ANTHROPIC_ATTRIBUTION_PROOF_SECRET)
+    .update(payload)
+    .digest();
+  const actualSignature = Buffer.from(signature, "base64url");
+  if (
+    actualSignature.length !== expectedSignature.length ||
+    !timingSafeEqual(actualSignature, expectedSignature)
+  ) {
+    throw new Error("Anthropic attribution payload contains invalid attribution proof");
+  }
+  const decoded = parseJsonObject(
+    Buffer.from(payload, "base64url").toString("utf8"),
+    "Anthropic attribution proof",
+  );
+  const identityBlocks = decoded["identityBlocks"];
+  if (
+    typeof decoded["accountUuid"] !== "string" ||
+    typeof decoded["deviceId"] !== "string" ||
+    typeof decoded["sessionId"] !== "string" ||
+    typeof decoded["billingSystemText"] !== "string" ||
+    !Array.isArray(identityBlocks) ||
+    identityBlocks.length !== 2 ||
+    !isPlainObject(identityBlocks[0]) ||
+    !isPlainObject(identityBlocks[1])
+  ) {
+    throw new Error("Anthropic attribution proof identity is malformed");
+  }
+  return {
+    accountUuid: decoded["accountUuid"],
+    deviceId: decoded["deviceId"],
+    sessionId: decoded["sessionId"],
+    billingSystemText: decoded["billingSystemText"],
+    identityBlocks: [identityBlocks[0], identityBlocks[1]],
+  };
+}
 
 // Sanitization behavior derived from the MIT-licensed ravshansbox/pi-anthropic-sps
 // extension at commit 17409b5615f0ec0625776bc5434f92f2c55e3fd0. Keep exact-match
@@ -315,7 +383,7 @@ function isPlainObject(value: unknown): value is JsonObject {
 }
 
 function providerEnvValue(name: string, env?: ProviderEnv): string | undefined {
-  return env === undefined ? process.env[name] : env[name];
+  return env?.[name] ?? process.env[name];
 }
 
 function parseCacheRetention(value: unknown, source: string): CacheRetention {
@@ -351,6 +419,8 @@ function anthropicCompatibility(model: PiModelLike): {
   supportsLongCacheRetention: boolean | undefined;
   supportsCacheControlOnTools: boolean | undefined;
   supportsTemperature: boolean | undefined;
+  supportsStrictTools: boolean;
+  allowEmptySignature: boolean;
 } {
   const compat: unknown = model.compat;
   if (compat === undefined) {
@@ -358,12 +428,16 @@ function anthropicCompatibility(model: PiModelLike): {
       supportsLongCacheRetention: undefined,
       supportsCacheControlOnTools: undefined,
       supportsTemperature: undefined,
+      supportsStrictTools: false,
+      allowEmptySignature: false,
     };
   }
   if (!isPlainObject(compat)) throw new Error("Anthropic model compat must be an object");
   const supportsLongCacheRetention = compat["supportsLongCacheRetention"];
   const supportsCacheControlOnTools = compat["supportsCacheControlOnTools"];
   const supportsTemperature = compat["supportsTemperature"];
+  const supportsStrictTools = compat["supportsStrictTools"];
+  const allowEmptySignature = compat["allowEmptySignature"];
   if (supportsLongCacheRetention !== undefined && typeof supportsLongCacheRetention !== "boolean") {
     throw new Error("Anthropic model compat.supportsLongCacheRetention must be boolean");
   }
@@ -376,7 +450,19 @@ function anthropicCompatibility(model: PiModelLike): {
   if (supportsTemperature !== undefined && typeof supportsTemperature !== "boolean") {
     throw new Error("Anthropic model compat.supportsTemperature must be boolean");
   }
-  return { supportsLongCacheRetention, supportsCacheControlOnTools, supportsTemperature };
+  if (supportsStrictTools !== undefined && typeof supportsStrictTools !== "boolean") {
+    throw new Error("Anthropic model compat.supportsStrictTools must be boolean");
+  }
+  if (allowEmptySignature !== undefined && typeof allowEmptySignature !== "boolean") {
+    throw new Error("Anthropic model compat.allowEmptySignature must be boolean");
+  }
+  return {
+    supportsLongCacheRetention,
+    supportsCacheControlOnTools,
+    supportsTemperature,
+    supportsStrictTools: supportsStrictTools ?? false,
+    allowEmptySignature: allowEmptySignature ?? false,
+  };
 }
 
 function resolveAnthropicCacheControl(
@@ -855,6 +941,19 @@ export function rewriteAnthropicRequestPayload(args: {
           cacheRetention: args.cacheRetention,
         });
 
+  const rewrittenSystem = withClaudeCodeSystemIdentity(
+    args.payload["system"],
+    billingSystemText,
+    cacheControl,
+  );
+  if (!Array.isArray(rewrittenSystem)) {
+    throw new Error("Anthropic attribution system identity must be an array");
+  }
+  const firstIdentityBlock = rewrittenSystem[0];
+  const secondIdentityBlock = rewrittenSystem[1];
+  if (!isPlainObject(firstIdentityBlock) || !isPlainObject(secondIdentityBlock)) {
+    throw new Error("Anthropic attribution required system identity blocks are malformed");
+  }
   const rewritten: JsonObject = {
     ...args.payload,
     metadata: {
@@ -865,8 +964,15 @@ export function rewriteAnthropicRequestPayload(args: {
         session_id: sessionId,
       }),
     },
-    system: withClaudeCodeSystemIdentity(args.payload["system"], billingSystemText, cacheControl),
+    system: rewrittenSystem,
   };
+  rewritten[ANTHROPIC_ATTRIBUTION_PROOF_KEY] = encodeAnthropicAttributionProof({
+    accountUuid: args.account.accountUuid,
+    deviceId: args.account.deviceId,
+    sessionId,
+    billingSystemText,
+    identityBlocks: [structuredClone(firstIdentityBlock), structuredClone(secondIdentityBlock)],
+  });
   if (thinking !== undefined) rewritten["thinking"] = thinking;
   assertCacheControlBreakpointLimit(rewritten);
 
@@ -1014,7 +1120,11 @@ function markLastConversationCacheSurface(
   return output;
 }
 
-function convertAssistantBlocks(content: unknown, messageIndex: number): JsonObject[] {
+function convertAssistantBlocks(
+  content: unknown,
+  messageIndex: number,
+  allowEmptySignature: boolean,
+): JsonObject[] {
   if (!Array.isArray(content) || content.length === 0) {
     throw new Error(
       `Anthropic attribution assistant message ${String(messageIndex)} must have content blocks`,
@@ -1036,19 +1146,33 @@ function convertAssistantBlocks(content: unknown, messageIndex: number): JsonObj
       continue;
     }
     if (rawBlock["type"] === "thinking") {
-      const thinkingSignature = nonEmptyString(
-        rawBlock["thinkingSignature"],
-        `${label}.thinkingSignature`,
-      );
       if (rawBlock["redacted"] === true) {
-        converted.push({ type: "redacted_thinking", data: thinkingSignature });
-      } else {
         converted.push({
-          type: "thinking",
-          thinking: sanitizeSurrogates(nonEmptyString(rawBlock["thinking"], `${label}.thinking`)),
-          signature: thinkingSignature,
+          type: "redacted_thinking",
+          data: nonEmptyString(rawBlock["thinkingSignature"], `${label}.thinkingSignature`),
         });
+        continue;
       }
+      const thinking = sanitizeSurrogates(
+        nonEmptyString(rawBlock["thinking"], `${label}.thinking`),
+      );
+      const thinkingSignature = rawBlock["thinkingSignature"];
+      if (
+        thinkingSignature === undefined ||
+        (typeof thinkingSignature === "string" && thinkingSignature.trim().length === 0)
+      ) {
+        converted.push(
+          allowEmptySignature
+            ? { type: "thinking", thinking, signature: "" }
+            : { type: "text", text: thinking },
+        );
+        continue;
+      }
+      converted.push({
+        type: "thinking",
+        thinking,
+        signature: nonEmptyString(thinkingSignature, `${label}.thinkingSignature`),
+      });
       continue;
     }
     if (rawBlock["type"] === "toolCall") {
@@ -1093,7 +1217,8 @@ function convertToolResultMessage(message: JsonObject, messageIndex: number): Js
 
 function convertMessages(
   messages: Context["messages"],
-  cacheControl?: AnthropicCacheControl,
+  cacheControl: AnthropicCacheControl | undefined,
+  allowEmptySignature: boolean,
 ): JsonObject[] {
   const params: JsonObject[] = [];
   for (let index = 0; index < messages.length; index += 1) {
@@ -1116,7 +1241,7 @@ function convertMessages(
     if (role === "assistant") {
       params.push({
         role: "assistant",
-        content: convertAssistantBlocks(rawMessage["content"], index),
+        content: convertAssistantBlocks(rawMessage["content"], index, allowEmptySignature),
       });
       continue;
     }
@@ -1145,6 +1270,7 @@ function convertMessages(
 
 function convertTools(
   tools: readonly PiToolLike[] | undefined,
+  supportsStrictTools: boolean,
   cacheControl?: AnthropicCacheControl,
 ): JsonObject[] {
   if (!tools || tools.length === 0) return [];
@@ -1166,10 +1292,25 @@ function convertTools(
     if (tool.description !== undefined && typeof tool.description !== "string") {
       throw new Error(`Anthropic attribution tool ${tool.name} description must be a string`);
     }
+    if (tool.constrainedSampling && tool.constrainedSampling.type === "grammar") {
+      throw new Error(
+        `Tool "${tool.name}" cannot use grammar constrained sampling with the Anthropic transport`,
+      );
+    }
+    const strict = resolveJsonSchemaStrictSampling(tool, supportsStrictTools);
+    const resolvedParameters = getJsonSchemaToolParameters(tool, strict);
+    const resolvedSchema = resolvedParameters as JsonObject;
+    const legacyInputSchema: JsonObject = {
+      type: "object",
+      properties: resolvedSchema["properties"] ?? {},
+      required: resolvedSchema["required"] ?? [],
+    };
     const converted: JsonObject = {
       name: tool.name,
       ...(tool.description === undefined ? {} : { description: tool.description }),
-      input_schema: parameters,
+      ...(strict === true ? { strict: true } : {}),
+      input_schema:
+        strict === true ? { ...resolvedParameters, ...legacyInputSchema } : legacyInputSchema,
     };
     return cacheControl !== undefined && index === tools.length - 1
       ? cloneBlockWithCacheControl(converted, cacheControl)
@@ -1241,9 +1382,10 @@ export function buildAnthropicRequestParams(
   const policy = resolveClaudeCodeModelPolicy(model);
   const maxTokens = resolveRequestMaxTokens(model, options?.maxTokens);
   const cacheControl = resolveAnthropicCacheControl(model, options);
+  const compatibility = anthropicCompatibility(model);
   const params: JsonObject = {
     model: policy.modelId,
-    messages: convertMessages(context.messages, cacheControl),
+    messages: convertMessages(context.messages, cacheControl, compatibility.allowEmptySignature),
     max_tokens: maxTokens,
     stream: true,
   };
@@ -1258,9 +1400,9 @@ export function buildAnthropicRequestParams(
       cacheControl,
     );
   }
-  const compatibility = anthropicCompatibility(model);
   const tools = convertTools(
     context.tools,
+    compatibility.supportsStrictTools,
     compatibility.supportsCacheControlOnTools === false ? undefined : cacheControl,
   );
   if (tools.length > 0) params["tools"] = tools;
@@ -1292,11 +1434,66 @@ export function buildAnthropicRequestParams(
   return params;
 }
 
+function sameJsonValue(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function validateExpectedAnthropicAttribution(
+  payload: JsonObject,
+  expectedSessionId: string | undefined,
+): ExpectedAnthropicAttribution {
+  const proof = payload[ANTHROPIC_ATTRIBUTION_PROOF_KEY];
+  delete payload[ANTHROPIC_ATTRIBUTION_PROOF_KEY];
+  const expected = decodeAnthropicAttributionProof(proof);
+  if (expectedSessionId !== undefined && expected.sessionId !== expectedSessionId) {
+    throw new Error("Anthropic attribution expected session identity does not match request session");
+  }
+  const metadata = payload["metadata"];
+  if (!isPlainObject(metadata) || typeof metadata["user_id"] !== "string") {
+    throw new Error("Anthropic attribution metadata.user_id is required");
+  }
+  const identity = parseJsonObject(metadata["user_id"], "Anthropic attribution metadata.user_id");
+  const identityKeys = Object.keys(identity).sort();
+  if (identityKeys.join(",") !== "account_uuid,device_id,session_id") {
+    throw new Error("Anthropic attribution metadata.user_id must contain the exact attribution identity");
+  }
+  if (identity["account_uuid"] !== expected.accountUuid) {
+    throw new Error("Anthropic attribution account_uuid must match the expected attribution value");
+  }
+  if (identity["device_id"] !== expected.deviceId) {
+    throw new Error("Anthropic attribution device_id must match the expected attribution value");
+  }
+  if (identity["session_id"] !== expected.sessionId) {
+    throw new Error("Anthropic attribution session_id must match the expected attribution value");
+  }
+  const system = payload["system"];
+  if (!Array.isArray(system) || system.length < expected.identityBlocks.length) {
+    throw new Error("Anthropic attribution required system identity blocks are missing");
+  }
+  if (!sameJsonValue(system[0], expected.identityBlocks[0])) {
+    throw new Error("Anthropic attribution billing identity must remain the exact expected value");
+  }
+  if (!sameJsonValue(system[1], expected.identityBlocks[1])) {
+    throw new Error("Anthropic attribution required system identity must remain the exact expected value");
+  }
+  if (
+    !isPlainObject(system[0]) ||
+    system[0]["text"] !== expected.billingSystemText ||
+    !isPlainObject(system[1]) ||
+    system[1]["text"] !== CLAUDE_AGENT_SDK_SYSTEM_TEXT
+  ) {
+    throw new Error("Anthropic attribution required system identity blocks are malformed");
+  }
+  return expected;
+}
+
 function validateFinalAnthropicPayload(
   payload: JsonObject,
   model: PiModelLike,
   expectedMaxTokens: number,
-): void {
+  expectedSessionId: string | undefined,
+): ExpectedAnthropicAttribution {
+  const expectedAttribution = validateExpectedAnthropicAttribution(payload, expectedSessionId);
   assertJsonValue(payload);
   assertNoUnpairedSurrogates(payload);
   const policy = resolveClaudeCodeModelPolicy(model);
@@ -1313,6 +1510,7 @@ function validateFinalAnthropicPayload(
   }
   rewriteThinking(payload, maxTokens);
   assertCacheControlBreakpointLimit(payload);
+  return expectedAttribution;
 }
 
 function headersToRecord(headers: Headers): Record<string, string> {
@@ -1726,8 +1924,11 @@ function createRequestAbortScope(
   };
 }
 
-function retryableHttpStatus(status: number): boolean {
-  return status === 408 || status === 409 || status === 429 || status >= 500;
+function retryableHttpResponse(response: Response): boolean {
+  const shouldRetry = response.headers.get("x-should-retry");
+  if (shouldRetry === "true") return true;
+  if (shouldRetry === "false") return false;
+  return response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500;
 }
 
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
@@ -1813,7 +2014,7 @@ async function fetchAnthropicResponse(input: {
       await abortableDelay(delay, input.parentSignal);
       continue;
     }
-    if (retryableHttpStatus(response.status) && attempt < input.maxRetries) {
+    if (retryableHttpResponse(response) && attempt < input.maxRetries) {
       const errorMessage = `Anthropic beta messages request failed: HTTP ${String(response.status)} ${response.statusText}`;
       let delay: number;
       try {
@@ -2178,19 +2379,13 @@ export function streamAnthropicViaBetaMessages(
           throw new Error("Anthropic attribution onPayload returned a non-object payload");
         params = nextParams;
       }
-      validateFinalAnthropicPayload(params, anthropicModel, expectedMaxTokens);
-      const metadataUserId = isPlainObject(params["metadata"])
-        ? params["metadata"]["user_id"]
-        : undefined;
-      let sessionId: string | undefined;
-      if (typeof metadataUserId === "string") {
-        const parsed = parseJsonObject(metadataUserId, "Anthropic attribution metadata.user_id");
-        if (typeof parsed["session_id"] === "string") sessionId = parsed["session_id"];
-      }
-      if (!sessionId)
-        throw new Error(
-          "Anthropic attribution could not derive session_id from rewritten metadata.user_id",
-        );
+      const expectedAttribution = validateFinalAnthropicPayload(
+        params,
+        anthropicModel,
+        expectedMaxTokens,
+        options?.sessionId,
+      );
+      const sessionId = expectedAttribution.sessionId;
 
       const configuredTransport = transportOptions(options);
       if (
