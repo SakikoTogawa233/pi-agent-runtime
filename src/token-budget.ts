@@ -238,7 +238,9 @@ export interface TokenBudgetPerSegmentEstimate extends TokenBudgetByteClassBreak
   ascii_whitespace_bytes: number;
   normal_rate_bytes_per_token_x100: number;
   normal_tokens: number;
-  multibyte_rate_bytes_per_token_x100: typeof TOKEN_BUDGET_MULTIBYTE_FATAL_RATE_X100;
+  multibyte_rate_bytes_per_token_x100:
+    | typeof TOKEN_BUDGET_MULTIBYTE_FATAL_RATE_X100
+    | typeof TOKEN_BUDGET_PROVABLE_RATE_X100;
   multibyte_tokens: number;
   multibyte_provable_tokens: number;
   dense_tokens: number;
@@ -667,10 +669,11 @@ export function estimateInputTokens(input: EstimateInputTokensInput): EstimateIn
         : rateSource.effective_rate_bytes_per_token_x100;
     const normalTokens = tokensAtRate(normalBytes, normalRate);
     const unknownTokens = tokensAtRate(unknownBytes, TOKEN_BUDGET_PROVABLE_RATE_X100);
-    const multibyteTokens = tokensAtRate(
-      segment.multibyteBytes,
-      TOKEN_BUDGET_MULTIBYTE_FATAL_RATE_X100,
-    );
+    const multibyteRate =
+      estimatorProfile === "calibrated"
+        ? TOKEN_BUDGET_MULTIBYTE_FATAL_RATE_X100
+        : TOKEN_BUDGET_PROVABLE_RATE_X100;
+    const multibyteTokens = tokensAtRate(segment.multibyteBytes, multibyteRate);
     const multibyteProvableTokens = tokensAtRate(
       segment.multibyteBytes,
       TOKEN_BUDGET_PROVABLE_RATE_X100,
@@ -685,12 +688,7 @@ export function estimateInputTokens(input: EstimateInputTokensInput): EstimateIn
       unknown_output_contract_bytes: unknownBytes,
     };
     addBucket(fatalBuckets, normalRate, normalBytes, "normal");
-    addBucket(
-      fatalBuckets,
-      TOKEN_BUDGET_MULTIBYTE_FATAL_RATE_X100,
-      segment.multibyteBytes,
-      "multibyte",
-    );
+    addBucket(fatalBuckets, multibyteRate, segment.multibyteBytes, "multibyte");
     addBucket(fatalBuckets, TOKEN_BUDGET_PROVABLE_RATE_X100, segment.denseBytes, "dense_ascii");
     addBucket(
       fatalBuckets,
@@ -719,7 +717,7 @@ export function estimateInputTokens(input: EstimateInputTokensInput): EstimateIn
       ascii_whitespace_bytes: segment.asciiWhitespaceBytes,
       normal_rate_bytes_per_token_x100: normalRate,
       normal_tokens: normalTokens,
-      multibyte_rate_bytes_per_token_x100: TOKEN_BUDGET_MULTIBYTE_FATAL_RATE_X100,
+      multibyte_rate_bytes_per_token_x100: multibyteRate,
       multibyte_tokens: multibyteTokens,
       multibyte_provable_tokens: multibyteProvableTokens,
       dense_tokens: denseTokens,
@@ -817,6 +815,42 @@ export function tokenUpperBound(utf8Bytes: number): number {
   }).tokens;
 }
 
+function capacityRateForProfile(input: {
+  family: TokenBudgetFamily;
+  allowedInputTokens: number;
+  profile: TokenBudgetEstimatorProfile;
+  calibrationBacked: boolean;
+}): { readonly rateBytesPerTokenX100: number; readonly affineTokens: number } {
+  const calibration = calibrationFor(input.family);
+  if (input.profile === "calibrated") {
+    if (!calibration.provenance.backed || !input.calibrationBacked) {
+      throw new Error("Calibrated token estimation requires exact calibration backing");
+    }
+    if (
+      Math.floor(
+        (input.allowedInputTokens * calibration.rate_bytes_per_token_x100) /
+          TOKEN_BUDGET_RATE_SCALE,
+      ) < TOKEN_BUDGET_LARGE_PROMPT_MIN_BYTES
+    ) {
+      throw new Error(
+        "Calibrated token estimation route capacity is outside the calibration domain",
+      );
+    }
+    return {
+      rateBytesPerTokenX100: calibration.rate_bytes_per_token_x100,
+      affineTokens: calibration.affine_f_tokens,
+    };
+  }
+  const ceiling =
+    input.profile === "strict-launch" || input.profile === "strict-runtime"
+      ? TOKEN_BUDGET_STRICT_RATE_X100
+      : TOKEN_BUDGET_PROVABLE_RATE_X100;
+  return {
+    rateBytesPerTokenX100: Math.min(calibration.rate_bytes_per_token_x100, ceiling),
+    affineTokens: calibration.affine_f_tokens,
+  };
+}
+
 export function maxKnownTextBytesForTokens(input: {
   family: TokenBudgetFamily;
   allowedInputTokens: number;
@@ -825,26 +859,13 @@ export function maxKnownTextBytesForTokens(input: {
   familyResolution: ResolvedTokenBudgetFamily["resolution"] | "family_direct";
 }): number {
   assertSafeNonNegativeInteger(input.allowedInputTokens, "allowedInputTokens");
-  const rate = effectiveRateSource({
-    family: input.family,
-    allowedInputTokens: input.allowedInputTokens,
-    estimatorProfile: input.profile,
-    promptProfile: profileForSegments([], {
-      total_bytes: 0,
-      normal_bytes: 0,
-      multibyte_bytes: 0,
-      dense_bytes: 0,
-      unknown_output_contract_bytes: 0,
-    }),
-    calibrationBacked: input.calibrationBacked,
-    familyResolution: input.familyResolution,
-  });
-  const variableTokens = input.allowedInputTokens - rate.affine_f_tokens;
+  const capacity = capacityRateForProfile(input);
+  const variableTokens = input.allowedInputTokens - capacity.affineTokens;
   if (variableTokens <= 0) {
     throw new RangeError("allowedInputTokens must exceed the affine token reserve");
   }
   return Math.floor(
-    (variableTokens * rate.effective_rate_bytes_per_token_x100) / TOKEN_BUDGET_RATE_SCALE,
+    (variableTokens * capacity.rateBytesPerTokenX100) / TOKEN_BUDGET_RATE_SCALE,
   );
 }
 
