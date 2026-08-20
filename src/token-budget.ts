@@ -141,11 +141,6 @@ const MODEL_OVERRIDES: Readonly<Record<string, TokenBudgetFamily>> = Object.free
   "openai-codex/gpt-5.5": "openai-codex",
   "openai-codex/gpt-5.4-mini": "openai-codex",
 });
-const PROVIDER_DEFAULTS: Readonly<Record<string, TokenBudgetFamily>> = Object.freeze({
-  anthropic: "anthropic",
-  "openai-codex": "openai-codex",
-});
-
 export interface TokenBudgetRouteLike {
   provider: string;
   model: string;
@@ -157,7 +152,7 @@ export interface ResolvedTokenBudgetFamily {
   model: string;
   qualified_id: string;
   backed: boolean;
-  resolution: "model_override" | "known_provider_unbacked_model" | "unknown_provider_floor";
+  resolution: "model_override";
 }
 
 export function resolveTokenBudgetFamily(route: TokenBudgetRouteLike): ResolvedTokenBudgetFamily {
@@ -173,25 +168,7 @@ export function resolveTokenBudgetFamily(route: TokenBudgetRouteLike): ResolvedT
       resolution: "model_override",
     };
   }
-  const providerDefault = PROVIDER_DEFAULTS[route.provider];
-  if (providerDefault !== undefined) {
-    return {
-      family: providerDefault,
-      provider: route.provider,
-      model: route.model,
-      qualified_id: qualified,
-      backed: false,
-      resolution: "known_provider_unbacked_model",
-    };
-  }
-  return {
-    family: "unknown",
-    provider: route.provider,
-    model: route.model,
-    qualified_id: qualified,
-    backed: false,
-    resolution: "unknown_provider_floor",
-  };
+  throw new Error(`No calibrated token family for route ${qualified}`);
 }
 
 export type TokenBudgetSegment =
@@ -232,7 +209,7 @@ export interface TokenBudgetDenseAsciiGate {
   measured_whitespace_fraction_x10000: number | null;
   evaluated: boolean;
   out_of_distribution: boolean;
-  decision: "not_evaluated" | "calibrated_allowed" | "conservative_fallback";
+  decision: "not_evaluated" | "calibrated_allowed" | "outside_calibration";
   reason:
     | "prompt_below_large_prompt_floor"
     | "multibyte_or_non_ascii_dominant"
@@ -274,19 +251,10 @@ export interface TokenBudgetRateSource {
   family: TokenBudgetFamily;
   configured_rate_bytes_per_token_x100: number;
   effective_rate_bytes_per_token_x100: number;
-  conservative_rate_bytes_per_token_x100: number;
   strict_rate_bytes_per_token_x100: typeof TOKEN_BUDGET_STRICT_RATE_X100;
   affine_f_tokens: number;
   profile: TokenBudgetEstimatorProfile;
-  source:
-    | "calibrated_large_window"
-    | "conservative_small_prompt"
-    | "conservative_capacity_guard"
-    | "conservative_dense_ascii_whitespace_gate"
-    | "strict_launch"
-    | "provable_profile"
-    | "unknown_provider_floor"
-    | "unbacked_model_floor";
+  source: "calibrated_large_window" | "strict_launch" | "provable_profile";
   backed: boolean;
   provenance: TokenBudgetCalibrationProvenance;
   model_resolution: ResolvedTokenBudgetFamily["resolution"] | "family_direct";
@@ -344,10 +312,6 @@ function tokensAtRate(bytes: number, rateBytesPerTokenX100: number): number {
   assertSafeNonNegativeInteger(bytes, "bytes");
   assertPositiveInteger(rateBytesPerTokenX100, "rateBytesPerTokenX100");
   return ceilDiv(bytes * TOKEN_BUDGET_RATE_SCALE, rateBytesPerTokenX100);
-}
-
-function conservativeCalibratedRate(configured: number): number {
-  return Math.min(configured, TOKEN_BUDGET_CONSERVATIVE_RATE_X100);
 }
 
 interface NormalizedTokenBudgetSegment {
@@ -425,7 +389,7 @@ function dominantByteClass(breakdown: TokenBudgetByteClassBreakdown): TokenBudge
       { byteClass: "normal", bytes: breakdown.normal_bytes, order: 3 },
     ];
   entries.sort((left, right) => right.bytes - left.bytes || left.order - right.order);
-  return entries[0]?.byteClass ?? "normal";
+  return entries[0]!.byteClass;
 }
 
 function profileForSegments(
@@ -488,7 +452,7 @@ function denseAsciiGate(profile: TokenBudgetPromptProfile): TokenBudgetDenseAsci
       ...base,
       evaluated: true,
       out_of_distribution: true,
-      decision: "conservative_fallback",
+      decision: "outside_calibration",
       reason: "whitespace_fraction_unavailable",
     };
   }
@@ -497,7 +461,7 @@ function denseAsciiGate(profile: TokenBudgetPromptProfile): TokenBudgetDenseAsci
       ...base,
       evaluated: true,
       out_of_distribution: true,
-      decision: "conservative_fallback",
+      decision: "outside_calibration",
       reason: "below_threshold",
     };
   }
@@ -510,35 +474,12 @@ function denseAsciiGate(profile: TokenBudgetPromptProfile): TokenBudgetDenseAsci
   };
 }
 
-function rateSourceWarning(input: {
-  source: TokenBudgetRateSource["source"];
-  family: TokenBudgetFamily;
-  promptProfile: TokenBudgetPromptProfile;
-  gate: TokenBudgetDenseAsciiGate;
-}): string | null {
-  if (input.source === "unknown_provider_floor") {
-    return `unknown provider family uses the provable 1.00 B/tok floor; no calibration backs ${input.family}`;
+function rateSourceWarning(source: TokenBudgetRateSource["source"]): string | null {
+  if (source === "strict_launch") {
+    return "explicit strict child launch/runtime profile uses the provable 1.00 B/tok rate";
   }
-  if (input.source === "unbacked_model_floor") {
-    return `model is not in the exact calibration backing set for family ${input.family}; using the provable 1.00 B/tok floor`;
-  }
-  if (input.source === "strict_launch") {
-    return "strict child launch/runtime uses the provable 1.00 B/tok profile when the prompt or route is below the backed large-prompt calibration domain";
-  }
-  if (input.source === "provable_profile") {
-    return "explicit conservative profile uses the provable 1.00 B/tok profile";
-  }
-  if (input.source === "conservative_small_prompt") {
-    return `calibrated rate withheld because measured prompt bytes ${String(input.promptProfile.concrete_known_bytes)} are below the ${String(TOKEN_BUDGET_LARGE_PROMPT_MIN_BYTES)}-byte calibration floor; using conservative profile`;
-  }
-  if (input.source === "conservative_capacity_guard") {
-    return `calibrated rate withheld because route capacity evaluated at the conservative rate cannot hold the ${String(TOKEN_BUDGET_LARGE_PROMPT_MIN_BYTES)}-byte calibration floor`;
-  }
-  if (input.source === "conservative_dense_ascii_whitespace_gate") {
-    if (input.gate.reason === "whitespace_fraction_unavailable") {
-      return "calibrated rate withheld because known-text whitespace bytes were not supplied; provide asciiWhitespaceBytes from a one-pass UTF-8 measurement to use calibrated rates";
-    }
-    return `calibrated rate withheld because whitespace fraction ${String(input.gate.measured_whitespace_fraction_x10000 ?? 0)}/${String(TOKEN_BUDGET_WHITESPACE_FRACTION_SCALE)} is below the dense-ASCII gate ${String(TOKEN_BUDGET_DENSE_ASCII_WHITESPACE_THRESHOLD_X10000)}/${String(TOKEN_BUDGET_WHITESPACE_FRACTION_SCALE)}; this is a heuristic token-density proxy, not a bound`;
+  if (source === "provable_profile") {
+    return "explicit provable profile uses the 1.00 B/tok rate";
   }
   return null;
 }
@@ -555,50 +496,44 @@ function effectiveRateSource(input: {
   const configured = calibration.rate_bytes_per_token_x100;
   const familyBacked = calibration.provenance.backed;
   const backed = familyBacked && input.calibrationBacked;
-  const conservativeRate = conservativeCalibratedRate(configured);
   const gate = denseAsciiGate(input.promptProfile);
   let source: TokenBudgetRateSource["source"];
   let effective: number;
   let calibrationApplied = false;
 
-  if (!backed) {
-    source =
-      input.familyResolution === "known_provider_unbacked_model"
-        ? "unbacked_model_floor"
-        : "unknown_provider_floor";
-    effective = TOKEN_BUDGET_PROVABLE_RATE_X100;
-  } else if (
-    input.estimatorProfile === "strict-runtime" ||
-    (input.estimatorProfile === "strict-launch" &&
-      (input.promptProfile.concrete_known_bytes < TOKEN_BUDGET_LARGE_PROMPT_MIN_BYTES ||
-        (input.allowedInputTokens !== undefined &&
-          Math.floor(
-            (input.allowedInputTokens * TOKEN_BUDGET_STRICT_RATE_X100) / TOKEN_BUDGET_RATE_SCALE,
-          ) < TOKEN_BUDGET_LARGE_PROMPT_MIN_BYTES)))
-  ) {
-    source = "strict_launch";
-    effective = Math.min(configured, TOKEN_BUDGET_STRICT_RATE_X100);
-  } else if (input.estimatorProfile === "provable") {
-    source = "provable_profile";
-    effective = Math.min(configured, TOKEN_BUDGET_PROVABLE_RATE_X100);
-  } else if (input.promptProfile.concrete_known_bytes < TOKEN_BUDGET_LARGE_PROMPT_MIN_BYTES) {
-    source = "conservative_small_prompt";
-    effective = conservativeRate;
-  } else if (
-    input.allowedInputTokens !== undefined &&
-    Math.floor((input.allowedInputTokens * conservativeRate) / TOKEN_BUDGET_RATE_SCALE) <
-      TOKEN_BUDGET_LARGE_PROMPT_MIN_BYTES
-  ) {
-    assertSafeNonNegativeInteger(input.allowedInputTokens, "allowedInputTokens");
-    source = "conservative_capacity_guard";
-    effective = conservativeRate;
-  } else if (gate.out_of_distribution) {
-    source = "conservative_dense_ascii_whitespace_gate";
-    effective = conservativeRate;
-  } else {
+  if (input.estimatorProfile === "calibrated") {
+    if (!backed) {
+      throw new Error("Calibrated token estimation requires exact calibration backing");
+    }
+    if (input.promptProfile.concrete_known_bytes < TOKEN_BUDGET_LARGE_PROMPT_MIN_BYTES) {
+      throw new Error(
+        `Calibrated token estimation requires the ${String(TOKEN_BUDGET_LARGE_PROMPT_MIN_BYTES)}-byte minimum prompt`,
+      );
+    }
+    if (
+      input.allowedInputTokens !== undefined &&
+      Math.floor((input.allowedInputTokens * configured) / TOKEN_BUDGET_RATE_SCALE) <
+        TOKEN_BUDGET_LARGE_PROMPT_MIN_BYTES
+    ) {
+      throw new Error(
+        "Calibrated token estimation route capacity is outside the calibration domain",
+      );
+    }
+    if (gate.out_of_distribution) {
+      throw new Error("Calibrated token estimation rejects dense ASCII outside calibration");
+    }
     source = "calibrated_large_window";
     effective = configured;
     calibrationApplied = true;
+  } else if (
+    input.estimatorProfile === "strict-launch" ||
+    input.estimatorProfile === "strict-runtime"
+  ) {
+    source = "strict_launch";
+    effective = Math.min(configured, TOKEN_BUDGET_STRICT_RATE_X100);
+  } else {
+    source = "provable_profile";
+    effective = Math.min(configured, TOKEN_BUDGET_PROVABLE_RATE_X100);
   }
 
   const dominant =
@@ -606,18 +541,11 @@ function effectiveRateSource(input: {
     input.promptProfile.normal_bytes >= input.promptProfile.multibyte_bytes
       ? "dense_ascii"
       : input.promptProfile.dominant_byte_class;
-  const rateSourceInput = {
-    source,
-    family: input.family,
-    promptProfile: input.promptProfile,
-    gate,
-  };
   return {
     calibration_version: TOKEN_BUDGET_CALIBRATION_VERSION,
     family: input.family,
     configured_rate_bytes_per_token_x100: configured,
     effective_rate_bytes_per_token_x100: effective,
-    conservative_rate_bytes_per_token_x100: conservativeRate,
     strict_rate_bytes_per_token_x100: TOKEN_BUDGET_STRICT_RATE_X100,
     affine_f_tokens: calibration.affine_f_tokens,
     profile: input.estimatorProfile,
@@ -630,7 +558,7 @@ function effectiveRateSource(input: {
     prompt_profile: { ...input.promptProfile, dominant_byte_class: dominant },
     dense_ascii_gate: gate,
     dominant_byte_class: dominant,
-    warning: rateSourceWarning(rateSourceInput),
+    warning: rateSourceWarning(source),
   };
 }
 
@@ -864,7 +792,7 @@ export function tokenUpperBound(utf8Bytes: number): number {
     family: "unknown",
     profile: "provable",
     calibrationBacked: false,
-    familyResolution: "unknown_provider_floor",
+    familyResolution: "family_direct",
     allowedInputTokens: undefined,
     segments: [
       {

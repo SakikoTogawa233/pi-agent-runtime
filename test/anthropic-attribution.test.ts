@@ -101,7 +101,9 @@ function recordingHost(bus: SynchronousBus): {
 
 describe("Anthropic request contracts", () => {
   it("requires an explicit cache policy and explicit model capabilities", () => {
-    expect(() => resolveCacheRetentionPreference({ env: {} })).toThrow(/cache retention.*required/i);
+    expect(() => resolveCacheRetentionPreference({ env: {} })).toThrow(
+      /cache retention.*required/i,
+    );
     expect(() =>
       buildAnthropicRequestParams(
         { ...anthropicModel, compat: undefined },

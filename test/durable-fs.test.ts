@@ -5,9 +5,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   assertPathContained,
   createDurableFileWriter,
-  DurableFileError,
   type DurableData,
   type DurableDirectoryHandle,
+  type DurableFileError,
   type DurableFileOperations,
   type DurableWritableHandle,
   type DurableWriteFlag,
@@ -35,12 +35,7 @@ type RecordedCall =
   | { kind: "openWritable"; path: string; flag: DurableWriteFlag; mode: number | undefined }
   | { kind: "writeFile"; path: string; data: DurableData }
   | {
-      kind:
-        | "syncFile"
-        | "closeFile"
-        | "openDirectory"
-        | "syncDirectory"
-        | "closeDirectory";
+      kind: "syncFile" | "closeFile" | "openDirectory" | "syncDirectory" | "closeDirectory";
       path: string;
     }
   | { kind: "rename"; source: string; target: string }

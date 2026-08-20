@@ -148,7 +148,11 @@ describe("parent snapshot", () => {
           getLeafEntry: () => undefined,
           getEntries: () => [],
         },
-        { toolCallId: undefined as never, toolName: "subagent_run", excludeActiveToolCallLeaf: true },
+        {
+          toolCallId: undefined as never,
+          toolName: "subagent_run",
+          excludeActiveToolCallLeaf: true,
+        },
       ),
     ).toThrow(/toolCallId/);
   });

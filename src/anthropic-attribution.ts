@@ -523,7 +523,7 @@ function isPlainObject(value: unknown): value is JsonObject {
 }
 
 function providerEnvValue(name: string, env?: ProviderEnv): string | undefined {
-  return env?.[name] ?? process.env[name];
+  return env === undefined ? process.env[name] : env[name];
 }
 
 function parseCacheRetention(value: unknown, source: string): CacheRetention {
@@ -548,10 +548,11 @@ export function resolveCacheRetentionPreference(
 ): CacheRetention {
   if (options?.cacheRetention !== undefined)
     return parseCacheRetention(options.cacheRetention, "cacheRetention");
-  if (sessionOverride !== undefined) return parseCacheRetention(sessionOverride, "session override");
+  if (sessionOverride !== undefined)
+    return parseCacheRetention(sessionOverride, "session override");
   const configured = providerEnvValue(CACHE_RETENTION_ENV, options?.env);
   if (configured !== undefined) return parseCacheRetention(configured, CACHE_RETENTION_ENV);
-  return "long";
+  throw new Error("Anthropic attribution cache retention policy is required");
 }
 
 function anthropicCompatibility(model: PiModelLike): {
@@ -559,22 +560,13 @@ function anthropicCompatibility(model: PiModelLike): {
   supportsCacheControlOnTools: boolean | undefined;
 } {
   const compat = model.compat;
-  if (compat === undefined) {
-    return {
-      supportsLongCacheRetention: undefined,
-      supportsCacheControlOnTools: undefined,
-    };
-  }
   if (!isPlainObject(compat)) throw new Error("Anthropic model compat must be an object");
   const supportsLongCacheRetention = compat.supportsLongCacheRetention;
   const supportsCacheControlOnTools = compat.supportsCacheControlOnTools;
-  if (supportsLongCacheRetention !== undefined && typeof supportsLongCacheRetention !== "boolean") {
+  if (typeof supportsLongCacheRetention !== "boolean") {
     throw new Error("Anthropic model compat.supportsLongCacheRetention must be boolean");
   }
-  if (
-    supportsCacheControlOnTools !== undefined &&
-    typeof supportsCacheControlOnTools !== "boolean"
-  ) {
+  if (typeof supportsCacheControlOnTools !== "boolean") {
     throw new Error("Anthropic model compat.supportsCacheControlOnTools must be boolean");
   }
   return { supportsLongCacheRetention, supportsCacheControlOnTools };
@@ -586,9 +578,12 @@ function resolveAnthropicCacheControl(
 ): AnthropicCacheControl | undefined {
   const retention = resolveCacheRetentionPreference(options);
   if (retention === "none") return undefined;
-  const supportsLongCacheRetention =
-    model === undefined ? undefined : anthropicCompatibility(model).supportsLongCacheRetention;
-  const ttl = retention === "long" && supportsLongCacheRetention !== false ? "1h" : undefined;
+  if (model === undefined) throw new Error("Anthropic cache control requires a model");
+  const supportsLongCacheRetention = anthropicCompatibility(model).supportsLongCacheRetention;
+  if (retention === "long" && !supportsLongCacheRetention) {
+    throw new Error("Anthropic model does not support requested long cache retention");
+  }
+  const ttl = retention === "long" ? "1h" : undefined;
   return ttl === undefined ? { type: "ephemeral" } : { type: "ephemeral", ttl };
 }
 
@@ -819,9 +814,9 @@ export function buildClaudeCodeBillingSystemText(firstUserMessageText: string): 
 
 export function buildAnthropicAttributionHeaders(
   sessionId: string,
-  model?: PiModelLike,
+  model: PiModelLike,
 ): Record<string, string> {
-  const beta = model === undefined ? CLAUDE_CODE_BETA : resolveClaudeCodeModelPolicy(model).beta;
+  const beta = resolveClaudeCodeModelPolicy(model).beta;
   return {
     [CLAUDE_CODE_SESSION_HEADER]: sessionId,
     "anthropic-beta": beta,
@@ -838,6 +833,7 @@ export function registerAnthropicAttributionProvider(
   getSessionOverride: () => Exclude<CacheRetention, "none"> | undefined = () => undefined,
 ): void {
   if (!isAnthropicContext(ctx)) return;
+  if (ctx.model === undefined) throw new Error("Anthropic attribution requires an active model");
   pi.registerProvider("anthropic", {
     api: "anthropic-messages",
     headers: buildAnthropicAttributionHeaders(getSessionId(ctx), ctx.model),
@@ -1032,17 +1028,11 @@ export function rewriteAnthropicRequestPayload(args: {
   const billingSystemText = buildClaudeCodeBillingSystemText(
     firstUserMessageTextFromPayload(args.payload),
   );
-  const incomingCache = inspectCacheControls(args.payload);
-  // The provider builder has already resolved environment/session defaults and
-  // selected the cache surfaces. No incoming marker can therefore be Pi's
-  // explicit call-level `cacheRetention: "none"` (used for compaction). Reapplying
-  // the process default here would silently defeat that opt-out.
-  const configuredCacheRetention = args.cacheRetention ?? incomingCache.retention;
   const cacheControl =
-    configuredCacheRetention === undefined
+    args.cacheRetention === undefined
       ? undefined
       : resolveAnthropicCacheControl(args.ctx.model, {
-          cacheRetention: configuredCacheRetention,
+          cacheRetention: args.cacheRetention,
         });
 
   const rewritten: JsonObject = {
@@ -1110,10 +1100,7 @@ function convertContentBlocks(content: unknown, label: string): string | JsonObj
         type: "image",
         source: {
           type: "base64",
-          media_type: nonEmptyString(
-            rawBlock["mimeType"],
-            `${label}[${String(index)}].mimeType`,
-          ),
+          media_type: nonEmptyString(rawBlock["mimeType"], `${label}[${String(index)}].mimeType`),
           data: nonEmptyString(rawBlock["data"], `${label}[${String(index)}].data`),
         },
       });
@@ -1282,7 +1269,10 @@ function convertMessages(
       continue;
     }
     if (role === "assistant") {
-      params.push({ role: "assistant", content: convertAssistantBlocks(rawMessage["content"], index) });
+      params.push({
+        role: "assistant",
+        content: convertAssistantBlocks(rawMessage["content"], index),
+      });
       continue;
     }
     if (role === "toolResult") {
@@ -1854,7 +1844,9 @@ async function processAnthropicSse(
     }
     if (parsed.name === "message_start") {
       if (sawMessageStart) {
-        throw new Error("Anthropic beta messages SSE sequence contains multiple message_start events");
+        throw new Error(
+          "Anthropic beta messages SSE sequence contains multiple message_start events",
+        );
       }
       const message = event["message"];
       if (!isPlainObject(message)) {
@@ -1876,11 +1868,15 @@ async function processAnthropicSse(
       }
       const index = sseIndex(event, parsed.name);
       if (seenBlockIndices.has(index)) {
-        throw new Error(`Anthropic beta messages SSE content block index ${String(index)} was reused`);
+        throw new Error(
+          `Anthropic beta messages SSE content block index ${String(index)} was reused`,
+        );
       }
       const contentBlock = event["content_block"];
       if (!isPlainObject(contentBlock)) {
-        throw new Error("Anthropic beta messages SSE content_block_start.content_block is malformed");
+        throw new Error(
+          "Anthropic beta messages SSE content_block_start.content_block is malformed",
+        );
       }
       if (contentBlock["type"] === "text") {
         const text = contentBlock["text"];
@@ -2236,7 +2232,9 @@ export function createAnthropicAttributionExtension(
       },
     };
     pi.events.emit(ANTHROPIC_ATTRIBUTION_CLAIM_CHANNEL, probe);
-    if (acknowledgements.length > 0) return;
+    if (acknowledgements.length > 0) {
+      throw new Error("Anthropic attribution ownership is already claimed");
+    }
 
     pi.registerProvider("anthropic", {
       api: "anthropic-messages",

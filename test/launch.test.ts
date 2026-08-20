@@ -1,9 +1,8 @@
+import { EventEmitter } from "node:events";
 import { readFileSync, realpathSync, statSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   assertWindowsCommandLineWithinLimit,
@@ -145,12 +144,7 @@ describe("Pi launch", () => {
 
   it("permits native Windows package bins and rejects shell or unknown targets", async () => {
     const built = await fixture();
-    const packageRoot = join(
-      built.root,
-      "node_modules",
-      "@earendil-works",
-      "pi-coding-agent",
-    );
+    const packageRoot = join(built.root, "node_modules", "@earendil-works", "pi-coding-agent");
     const manifest = join(packageRoot, "package.json");
     for (const extension of [".exe", ".com"]) {
       const target = join(packageRoot, "dist", `pi${extension}`);
@@ -172,12 +166,7 @@ describe("Pi launch", () => {
 
   it("rejects malformed manifests, missing bins, and directory targets", async () => {
     const built = await fixture();
-    const packageRoot = join(
-      built.root,
-      "node_modules",
-      "@earendil-works",
-      "pi-coding-agent",
-    );
+    const packageRoot = join(built.root, "node_modules", "@earendil-works", "pi-coding-agent");
     const manifest = join(packageRoot, "package.json");
     await writeFile(manifest, "{");
     expect(() => resolvePiLaunch(built.deps)).toThrow(/manifest JSON is invalid/);

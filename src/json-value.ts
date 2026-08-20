@@ -1,4 +1,10 @@
-export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue };
 
 function valueType(value: unknown): string {
   return value === null ? "null" : typeof value;
@@ -8,7 +14,11 @@ function failJson(path: string, detail: string): never {
   throw new TypeError(`JSON value at ${path} is unsupported: ${detail}`);
 }
 
-function assertArray(value: unknown[], path: string, ancestors: Set<object>): asserts value is JsonValue[] {
+function assertArray(
+  value: unknown[],
+  path: string,
+  ancestors: Set<object>,
+): asserts value is JsonValue[] {
   const expectedKeys = Array.from({ length: value.length }, (_unused, index) => String(index));
   const actualKeys = Object.keys(value);
   if (
@@ -20,7 +30,9 @@ function assertArray(value: unknown[], path: string, ancestors: Set<object>): as
   const ownKeys = Reflect.ownKeys(value);
   if (
     ownKeys.length !== expectedKeys.length + 1 ||
-    ownKeys.some((key) => key !== "length" && (typeof key !== "string" || !expectedKeys.includes(key)))
+    ownKeys.some(
+      (key) => key !== "length" && (typeof key !== "string" || !expectedKeys.includes(key)),
+    )
   ) {
     failJson(path, "arrays must contain only indexed JSON elements");
   }
@@ -48,7 +60,11 @@ function assertObject(
   }
 }
 
-function assertJsonValueAt(value: unknown, path: string, ancestors: Set<object>): asserts value is JsonValue {
+function assertJsonValueAt(
+  value: unknown,
+  path: string,
+  ancestors: Set<object>,
+): asserts value is JsonValue {
   if (value === null || typeof value === "string" || typeof value === "boolean") return;
   if (typeof value === "number") {
     if (!Number.isFinite(value)) failJson(path, "numbers must be finite");

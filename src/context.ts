@@ -565,7 +565,7 @@ export interface ParentContextSource {
 }
 
 export interface ParentSnapshotOptions {
-  toolCallId?: string;
+  toolCallId: string;
   toolName: string;
   excludeActiveToolCallLeaf: boolean;
 }
@@ -584,7 +584,7 @@ function entriesById(entries: readonly SessionEntry[]): Map<string, SessionEntry
 
 function messageContainsToolCall(
   message: JsonObject,
-  toolCallId: string | undefined,
+  toolCallId: string,
   toolName: string,
 ): boolean {
   if (message["role"] !== "assistant") return false;
@@ -597,7 +597,7 @@ function messageContainsToolCall(
       throw new Error("agent runtime parent assistant message leaf contains a malformed block");
     }
     if (part["type"] !== "toolCall") return false;
-    return toolCallId === undefined ? part["name"] === toolName : part["id"] === toolCallId;
+    return part["id"] === toolCallId;
   });
 }
 
@@ -607,6 +607,9 @@ export function resolveEffectiveLeaf(
 ): { leafId: string | null; activeToolCallLeafExcluded: boolean } {
   if (!options.excludeActiveToolCallLeaf) {
     return { leafId: sessionManager.getLeafId(), activeToolCallLeafExcluded: false };
+  }
+  if (typeof options.toolCallId !== "string" || options.toolCallId.trim().length === 0) {
+    throw new Error("agent runtime parent snapshot requires a non-empty toolCallId");
   }
   const leaf = sessionManager.getLeafEntry();
   if (leaf === undefined || leaf.type !== "message") {

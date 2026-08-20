@@ -38,7 +38,7 @@ describe("token estimation", () => {
       profile: "provable",
       allowedInputTokens: undefined,
       calibrationBacked: false,
-      familyResolution: "unknown_provider_floor",
+      familyResolution: "family_direct",
       segments: [knownTextSegment("a €"), unknownOutputContractSegment(100)],
     });
     expect(estimate.byte_class_breakdown).toEqual({
