@@ -827,8 +827,10 @@ function capacityRateForProfile(input: {
       throw new Error("Calibrated token estimation requires exact calibration backing");
     }
     if (
+      input.allowedInputTokens > calibration.affine_f_tokens &&
       Math.floor(
-        (input.allowedInputTokens * calibration.rate_bytes_per_token_x100) /
+        ((input.allowedInputTokens - calibration.affine_f_tokens) *
+          calibration.rate_bytes_per_token_x100) /
           TOKEN_BUDGET_RATE_SCALE,
       ) < TOKEN_BUDGET_LARGE_PROMPT_MIN_BYTES
     ) {
