@@ -326,7 +326,7 @@ type PiMessage =
       readonly role: "toolResult";
       readonly toolCallId: string;
       readonly content: readonly PiContentBlock[];
-      readonly isError?: boolean;
+      readonly isError: boolean;
     };
 
 export interface PiStreamContext {
@@ -1070,7 +1070,10 @@ export function rewriteAnthropicRequestPayload(args: {
 }
 
 function sanitizeSurrogates(text: string): string {
-  return text.replace(/[\uD800-\uDFFF]/g, "\uFFFD");
+  return text.replace(
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+    "\uFFFD",
+  );
 }
 
 function nonEmptyString(value: unknown, label: string): string {
@@ -1232,7 +1235,7 @@ function convertAssistantBlocks(content: unknown, messageIndex: number): JsonObj
 
 function convertToolResultMessage(message: JsonObject, messageIndex: number): JsonObject {
   const isError = message["isError"];
-  if (isError !== undefined && typeof isError !== "boolean") {
+  if (typeof isError !== "boolean") {
     throw new Error(
       `Anthropic attribution tool result message ${String(messageIndex)}.isError must be boolean`,
     );
@@ -1247,7 +1250,7 @@ function convertToolResultMessage(message: JsonObject, messageIndex: number): Js
       message["content"],
       `tool result message ${String(messageIndex)}.content`,
     ),
-    is_error: isError === true,
+    is_error: isError,
   };
 }
 

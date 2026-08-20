@@ -68,6 +68,7 @@ function assertJsonValueAt(
   if (value === null || typeof value === "string" || typeof value === "boolean") return;
   if (typeof value === "number") {
     if (!Number.isFinite(value)) failJson(path, "numbers must be finite");
+    if (Object.is(value, -0)) failJson(path, "negative zero is not canonical JSON");
     return;
   }
   if (typeof value !== "object") failJson(path, `received ${valueType(value)}`);
