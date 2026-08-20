@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ANTHROPIC_ATTRIBUTION_CLAIM_CHANNEL,
   type AnthropicAttributionExtensionHost,
@@ -6,8 +6,10 @@ import {
   buildAnthropicRequestParams,
   createAnthropicAttributionExtension,
   type PiModelLike,
+  type PiSimpleStreamOptions,
   resolveCacheRetentionPreference,
   rewriteAnthropicRequestPayload,
+  streamAnthropicViaBetaMessages,
 } from "../src/anthropic-attribution.js";
 
 const badLines = [
@@ -15,6 +17,10 @@ const badLines = [
   "- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md)",
   "- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing",
 ] as const;
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 const anthropicModel: PiModelLike = {
   provider: "anthropic",
@@ -152,6 +158,192 @@ describe("Anthropic request contracts", () => {
     expect(() =>
       buildAnthropicRequestParams(anthropicModel, { messages: [] }, { cacheRetention: "none" }),
     ).toThrow(/at least one message/);
+  });
+});
+
+function sseEvent(event: string, data: unknown): string {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+function successfulSse(text = "hello"): string {
+  return [
+    sseEvent("message_start", {
+      type: "message_start",
+      message: { id: "msg-1" },
+    }),
+    sseEvent("content_block_start", {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "text", text: "" },
+    }),
+    sseEvent("content_block_delta", {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text },
+    }),
+    sseEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+    sseEvent("message_delta", {
+      type: "message_delta",
+      delta: { stop_reason: "end_turn" },
+    }),
+    sseEvent("message_stop", { type: "message_stop" }),
+  ].join("");
+}
+
+function streamOptions(overrides: Partial<PiSimpleStreamOptions> = {}): PiSimpleStreamOptions {
+  return {
+    apiKey: "sk-ant-oat-test-token",
+    cacheRetention: "none",
+    onPayload: (payload) => ({
+      ...payload,
+      metadata: {
+        user_id: JSON.stringify({ session_id: "11111111-2222-4333-8444-555555555555" }),
+      },
+    }),
+    ...overrides,
+  };
+}
+
+async function streamedResult(
+  body: string,
+  options: PiSimpleStreamOptions = streamOptions(),
+): Promise<Awaited<ReturnType<ReturnType<typeof streamAnthropicViaBetaMessages>["result"]>>> {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(body, { status: 200 })));
+  return streamAnthropicViaBetaMessages(
+    anthropicModel,
+    { messages: [{ role: "user", content: "hello" }] },
+    options,
+  ).result();
+}
+
+describe("Anthropic beta messages transport", () => {
+  it("completes only after a valid message_stop sequence", async () => {
+    await expect(streamedResult(successfulSse())).resolves.toMatchObject({
+      stopReason: "stop",
+      responseId: "msg-1",
+      content: [{ type: "text", text: "hello" }],
+    });
+  });
+
+  it("turns provider SSE error events into error settlement", async () => {
+    const result = await streamedResult(
+      sseEvent("error", {
+        type: "error",
+        error: { type: "overloaded_error", message: "capacity exhausted" },
+      }),
+    );
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toMatch(/capacity exhausted/);
+  });
+
+  it("rejects unknown and out-of-order SSE event sequences", async () => {
+    const malformedBodies = [
+      [
+        sseEvent("message_start", { type: "message_start", message: { id: "msg-1" } }),
+        sseEvent("future_event", { type: "future_event" }),
+        sseEvent("message_delta", {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn" },
+        }),
+        sseEvent("message_stop", { type: "message_stop" }),
+      ].join(""),
+      [
+        sseEvent("message_start", { type: "message_start", message: { id: "msg-1" } }),
+        sseEvent("content_block_delta", {
+          type: "content_block_delta",
+          index: 9,
+          delta: { type: "text_delta", text: "orphan" },
+        }),
+        sseEvent("message_delta", {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn" },
+        }),
+        sseEvent("message_stop", { type: "message_stop" }),
+      ].join(""),
+      [
+        sseEvent("message_start", { type: "message_start", message: {} }),
+        sseEvent("message_delta", {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn" },
+        }),
+        sseEvent("message_stop", { type: "message_stop" }),
+      ].join(""),
+    ];
+
+    for (const body of malformedBodies) {
+      const result = await streamedResult(body);
+      expect(result.stopReason).toBe("error");
+      expect(result.errorMessage).toMatch(/SSE|sequence|response id|content block/i);
+    }
+  });
+
+  it("rejects EOF without message_stop and an unterminated final SSE record", async () => {
+    const missingStop = [
+      sseEvent("message_start", { type: "message_start", message: { id: "msg-1" } }),
+      sseEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+      }),
+    ].join("");
+    const incompleteStop = `${missingStop}event: message_stop\ndata: {"type":"message_stop"}`;
+
+    for (const body of [missingStop, incompleteStop]) {
+      const result = await streamedResult(body);
+      expect(result.stopReason).toBe("error");
+      expect(result.errorMessage).toMatch(/message_stop|unterminated|incomplete/i);
+    }
+  });
+
+  it("retries retryable HTTP failures according to maxRetries", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("busy", { status: 503, statusText: "Unavailable" }))
+      .mockResolvedValueOnce(new Response(successfulSse("retried"), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await streamAnthropicViaBetaMessages(
+      anthropicModel,
+      { messages: [{ role: "user", content: "hello" }] },
+      streamOptions({ maxRetries: 1 }),
+    ).result();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ stopReason: "stop", content: [{ text: "retried" }] });
+  });
+
+  it("enforces timeoutMs on the request instead of leaving it inert", async () => {
+    const fetchMock = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      if (!(init?.signal instanceof AbortSignal)) throw new Error("request signal missing");
+      return new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await streamAnthropicViaBetaMessages(
+      anthropicModel,
+      { messages: [{ role: "user", content: "hello" }] },
+      streamOptions({ timeoutMs: 5 }),
+    ).result();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toMatch(/timed out after 5 ms/);
+  });
+
+  it("rejects malformed timeout and retry options before transport", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    for (const options of [{ timeoutMs: 0 }, { maxRetries: -1 }, { maxRetries: 1.5 }]) {
+      const result = await streamAnthropicViaBetaMessages(
+        anthropicModel,
+        { messages: [{ role: "user", content: "hello" }] },
+        streamOptions(options),
+      ).result();
+      expect(result.stopReason).toBe("error");
+      expect(result.errorMessage).toMatch(/timeoutMs|maxRetries/);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
