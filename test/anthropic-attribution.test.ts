@@ -29,6 +29,11 @@ const anthropicModel: PiModelLike = {
   reasoning: true,
 };
 
+const pricedAnthropicModel: PiModelLike = {
+  ...anthropicModel,
+  cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+};
+
 function context(provider = "anthropic"): AnthropicContextLike {
   return {
     model: {
@@ -158,6 +163,41 @@ describe("Anthropic request contracts", () => {
     expect(() =>
       buildAnthropicRequestParams(anthropicModel, { messages: [] }, { cacheRetention: "none" }),
     ).toThrow(/at least one message/);
+  });
+
+  it("does not invent missing tool descriptions or temperature options", () => {
+    const params = buildAnthropicRequestParams(
+      anthropicModel,
+      {
+        messages: [{ role: "user", content: "hello" }],
+        tools: [
+          {
+            name: "read",
+            parameters: { type: "object", properties: {}, required: [] },
+          },
+        ],
+      },
+      { cacheRetention: "none" },
+    );
+    expect(params).not.toHaveProperty("temperature");
+    expect((params.tools as Array<Record<string, unknown>>)[0]).not.toHaveProperty("description");
+  });
+
+  it("rejects malformed system blocks instead of preserving them as a fallback path", () => {
+    expect(() =>
+      rewriteAnthropicRequestPayload({
+        payload: {
+          model: "claude-sonnet-4-5",
+          max_tokens: 64_000,
+          system: [42],
+          messages: [{ role: "user", content: "hello" }],
+        },
+        ctx: context(),
+        account: { deviceId: "device", accountUuid: "account" },
+        headerRegistered: true,
+        cacheRetention: "none",
+      }),
+    ).toThrow(/system block/i);
   });
 });
 
@@ -329,6 +369,28 @@ describe("Anthropic beta messages transport", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result.stopReason).toBe("error");
     expect(result.errorMessage).toMatch(/timed out after 5 ms/);
+  });
+
+  it("rejects an onPayload result containing unsupported JSON before fetch", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await streamAnthropicViaBetaMessages(
+      anthropicModel,
+      { messages: [{ role: "user", content: "hello" }] },
+      streamOptions({
+        onPayload: (payload) => ({
+          ...payload,
+          metadata: {
+            user_id: JSON.stringify({ session_id: "11111111-2222-4333-8444-555555555555" }),
+          },
+          unsupported: undefined,
+        }),
+      }),
+    ).result();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toMatch(/JSON/);
   });
 
   it("rejects malformed timeout and retry options before transport", async () => {

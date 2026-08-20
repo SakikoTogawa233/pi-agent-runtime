@@ -3,6 +3,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import {
   projectVisibleConversation,
+  resolveEffectiveLeaf,
   snapshotParentConversation,
   UnsupportedConversationBlockError,
 } from "../src/context.js";
@@ -119,6 +120,20 @@ describe("visible conversation projection", () => {
 });
 
 describe("parent snapshot", () => {
+  it("rejects a malformed message leaf instead of silently keeping it", () => {
+    expect(() =>
+      resolveEffectiveLeaf(
+        {
+          getLeafId: () => "leaf",
+          getLeafEntry: () =>
+            ({ id: "leaf", parentId: null, type: "message", message: null } as never),
+          getEntries: () => [],
+        },
+        { toolCallId: "active", toolName: "subagent_run", excludeActiveToolCallLeaf: true },
+      ),
+    ).toThrow(/message leaf/i);
+  });
+
   it("excludes the active tool-call leaf and every sibling call in that assistant message", () => {
     const session = SessionManager.inMemory("/tmp/project");
     session.appendMessage({ role: "user", content: "root question", timestamp: 1 });
