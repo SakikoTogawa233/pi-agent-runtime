@@ -71,7 +71,7 @@ describe("Pi 0.84.2 Anthropic host compatibility", () => {
         {
           name: "read",
           description: "Read a file",
-          input_schema: { type: "object", properties: {} },
+          input_schema: { type: "object", properties: {}, required: [] },
           cache_control: { type: "ephemeral" },
         },
       ]);
@@ -91,7 +91,7 @@ describe("Pi 0.84.2 Anthropic host compatibility", () => {
       {
         name: "read",
         description: "Read a file",
-        input_schema: { type: "object", properties: {} },
+        input_schema: { type: "object", properties: {}, required: [] },
       },
     ]);
   });
