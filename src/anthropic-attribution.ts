@@ -884,11 +884,33 @@ export function rewriteAnthropicRequestPayload(args: {
   return rewritten;
 }
 
+const UNPAIRED_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
 function sanitizeSurrogates(text: string): string {
   return text.replace(
     /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
     "\uFFFD",
   );
+}
+
+function assertNoUnpairedSurrogates(value: unknown, path = "$"): void {
+  if (typeof value === "string") {
+    if (UNPAIRED_SURROGATE.test(value)) {
+      throw new Error(`Anthropic attribution payload ${path} contains an unpaired surrogate`);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const [index, entry] of value.entries()) {
+      assertNoUnpairedSurrogates(entry, `${path}[${String(index)}]`);
+    }
+    return;
+  }
+  if (isPlainObject(value)) {
+    for (const [key, entry] of Object.entries(value)) {
+      assertNoUnpairedSurrogates(entry, `${path}.${key}`);
+    }
+  }
 }
 
 function nonEmptyString(value: unknown, label: string): string {
@@ -1265,6 +1287,29 @@ export function buildAnthropicRequestParams(
   }
   assertCacheControlBreakpointLimit(params);
   return params;
+}
+
+function validateFinalAnthropicPayload(
+  payload: JsonObject,
+  model: PiModelLike,
+  expectedMaxTokens: number,
+): void {
+  assertJsonValue(payload);
+  assertNoUnpairedSurrogates(payload);
+  const policy = resolveClaudeCodeModelPolicy(model);
+  if (payload["model"] !== policy.modelId) {
+    throw new Error(
+      `Anthropic attribution payload model must remain ${policy.modelId}; got ${String(payload["model"])}`,
+    );
+  }
+  const maxTokens = assertPositiveInteger(payload["max_tokens"], "max_tokens");
+  if (maxTokens !== expectedMaxTokens) {
+    throw new Error(
+      `Anthropic attribution payload max_tokens must remain ${String(expectedMaxTokens)}; got ${String(maxTokens)}`,
+    );
+  }
+  rewriteThinking(payload, maxTokens);
+  assertCacheControlBreakpointLimit(payload);
 }
 
 function headersToRecord(headers: Headers): Record<string, string> {
@@ -2048,6 +2093,7 @@ export function streamAnthropicViaBetaMessages(
       }
 
       const policy = resolveClaudeCodeModelPolicy(anthropicModel);
+      const expectedMaxTokens = resolveRequestMaxTokens(anthropicModel, options?.maxTokens);
       let params = buildAnthropicRequestParams(anthropicModel, context, options);
       const nextParams = await options?.onPayload?.(params, anthropicModel);
       if (nextParams !== undefined) {
@@ -2055,7 +2101,7 @@ export function streamAnthropicViaBetaMessages(
           throw new Error("Anthropic attribution onPayload returned a non-object payload");
         params = nextParams;
       }
-      assertJsonValue(params);
+      validateFinalAnthropicPayload(params, anthropicModel, expectedMaxTokens);
       const metadataUserId = isPlainObject(params["metadata"])
         ? params["metadata"]["user_id"]
         : undefined;
