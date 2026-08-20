@@ -1,8 +1,8 @@
 import type {
   AssistantMessage,
   AssistantMessageEventStream,
-  CacheRetention as HostCacheRetention,
   Context,
+  CacheRetention as HostCacheRetention,
   Model,
   SimpleStreamOptions,
   StreamFunction,
@@ -20,15 +20,16 @@ import {
   type PiSimpleStreamOptions,
   type PiStreamContext,
   type PiToolLike,
-  streamAnthropicViaBetaMessages,
+  type streamAnthropicViaBetaMessages,
 } from "../src/anthropic-attribution.js";
 
-type Equal<Left, Right> =
-  (<Type>() => Type extends Left ? 1 : 2) extends <Type>() => Type extends Right ? 1 : 2
-    ? (<Type>() => Type extends Right ? 1 : 2) extends <Type>() => Type extends Left ? 1 : 2
-      ? true
-      : false
-    : false;
+type Equal<Left, Right> = (<Type>() => Type extends Left ? 1 : 2) extends <
+  Type,
+>() => Type extends Right ? 1 : 2
+  ? (<Type>() => Type extends Right ? 1 : 2) extends <Type>() => Type extends Left ? 1 : 2
+    ? true
+    : false
+  : false;
 type Expect<Type extends true> = Type;
 
 type _ModelMatchesHost = Expect<Equal<PiModelLike, Model<"anthropic-messages">>>;
@@ -70,7 +71,7 @@ describe("Pi 0.84.2 Anthropic host compatibility", () => {
         {
           name: "read",
           description: "Read a file",
-          input_schema: { type: "object", properties: {}, required: [] },
+          input_schema: { type: "object", properties: {} },
           cache_control: { type: "ephemeral" },
         },
       ]);
@@ -90,7 +91,7 @@ describe("Pi 0.84.2 Anthropic host compatibility", () => {
       {
         name: "read",
         description: "Read a file",
-        input_schema: { type: "object", properties: {}, required: [] },
+        input_schema: { type: "object", properties: {} },
       },
     ]);
   });

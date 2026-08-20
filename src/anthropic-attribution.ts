@@ -3,7 +3,22 @@ import { appendFileSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
+  Api,
+  AssistantMessage,
+  AssistantMessageEventStream,
+  Context,
+  CacheRetention as HostCacheRetention,
+  Model,
+  SimpleStreamOptions,
+  TextContent,
+  ThinkingContent,
+  Tool,
+  ToolCall,
+} from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, hasApi } from "@earendil-works/pi-ai";
+import type {
   ExtensionAPI,
+  ExtensionContext,
   ExtensionFactory,
   ProviderConfig,
 } from "@earendil-works/pi-coding-agent";
@@ -84,8 +99,8 @@ const ANTHROPIC_SYSTEM_PROMPT_BAD_LINES = new Set([
 ]);
 
 type JsonObject = Record<string, unknown>;
-export type CacheRetention = "none" | "short" | "long";
-type ProviderEnv = Record<string, string | undefined>;
+export type CacheRetention = HostCacheRetention;
+type ProviderEnv = NonNullable<SimpleStreamOptions["env"]>;
 export interface AnthropicCacheControl {
   type: "ephemeral";
   ttl?: "1h" | "5m";
@@ -115,28 +130,9 @@ export interface ClaudeAttributionAccount {
   readonly accountUuid: string;
 }
 
-interface PiCostRatesLike {
-  readonly input?: number;
-  readonly output?: number;
-  readonly cacheRead?: number;
-  readonly cacheWrite?: number;
-  readonly inputTokensAbove?: number;
-}
+type PiCostRatesLike = Model<"anthropic-messages">["cost"];
 
-interface PiModelCostLike extends PiCostRatesLike {
-  readonly tiers?: readonly PiCostRatesLike[];
-}
-
-export interface PiModelLike {
-  readonly provider?: string;
-  readonly id?: string;
-  readonly api?: string;
-  readonly baseUrl?: string;
-  readonly maxTokens?: number;
-  readonly reasoning?: boolean;
-  readonly compat?: unknown;
-  readonly cost?: PiModelCostLike;
-}
+export type PiModelLike = Model<"anthropic-messages">;
 
 type ClaudeCodeThinkingPolicy = "fixed-budget" | "adaptive-effort";
 
@@ -303,220 +299,15 @@ const CLAUDE_CODE_MODEL_POLICIES: Record<string, ClaudeCodeModelPolicy> = Object
   ),
 });
 
-export interface AnthropicSessionManagerLike {
-  getSessionId(): string;
-}
-
-export interface AnthropicContextLike {
-  readonly model?: PiModelLike;
-  readonly sessionManager: AnthropicSessionManagerLike;
-}
-
+export type AnthropicContextLike = Pick<ExtensionContext, "model" | "sessionManager">;
 export type AnthropicAttributionExtensionHost = ExtensionAPI;
 type HostStreamSimple = NonNullable<ProviderConfig["streamSimple"]>;
 
-type PiContentBlock =
-  | { readonly type: "text"; readonly text: string }
-  | { readonly type: "image"; readonly mimeType: string; readonly data: string };
-
-type PiMessage =
-  | { readonly role: "user"; readonly content: string | readonly PiContentBlock[] }
-  | { readonly role: "assistant"; readonly content: readonly JsonObject[] }
-  | {
-      readonly role: "toolResult";
-      readonly toolCallId: string;
-      readonly content: readonly PiContentBlock[];
-      readonly isError: boolean;
-    };
-
-export interface PiStreamContext {
-  readonly messages: readonly PiMessage[];
-  readonly systemPrompt?: string;
-  readonly tools?: readonly PiToolLike[];
-}
-
-export interface PiToolLike {
-  readonly name: string;
-  readonly description?: string;
-  readonly parameters?: unknown;
-}
-
-export interface PiSimpleStreamOptions {
-  readonly apiKey?: string;
-  readonly headers?: Record<string, string>;
-  readonly maxTokens?: number;
-  readonly reasoning?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
-  readonly thinkingBudgets?: Partial<
-    Record<"minimal" | "low" | "medium" | "high" | "xhigh", number>
-  >;
-  readonly signal?: AbortSignal;
-  readonly timeoutMs?: number;
-  readonly maxRetries?: number;
-  readonly temperature?: number;
-  readonly cacheRetention?: CacheRetention;
-  readonly sessionId?: string;
-  readonly env?: ProviderEnv;
-  readonly metadata?: { readonly user_id?: string };
-  readonly toolChoice?: unknown;
-  readonly onPayload?: (payload: JsonObject, model: PiModelLike) => Promise<unknown> | unknown;
-  readonly onResponse?: (
-    response: { readonly status: number; readonly headers: Record<string, string> },
-    model: PiModelLike,
-  ) => Promise<void> | void;
-}
-
-export interface AssistantMessageLike {
-  role: "assistant";
-  content: JsonObject[];
-  api: string | undefined;
-  provider: string | undefined;
-  model: string | undefined;
-  usage: {
-    input: number;
-    output: number;
-    cacheRead: number;
-    cacheWrite: number;
-    cacheWrite1h?: number;
-    totalTokens: number;
-    cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
-  };
-  stopReason: "stop" | "length" | "toolUse" | "aborted" | "error";
-  timestamp: number;
-  responseId?: string;
-  errorMessage?: string;
-}
-
-type AssistantMessageEvent =
-  | { readonly type: "start"; readonly partial: AssistantMessageLike }
-  | {
-      readonly type: "text_start";
-      readonly contentIndex: number;
-      readonly partial: AssistantMessageLike;
-    }
-  | {
-      readonly type: "text_delta";
-      readonly contentIndex: number;
-      readonly delta: string;
-      readonly partial: AssistantMessageLike;
-    }
-  | {
-      readonly type: "text_end";
-      readonly contentIndex: number;
-      readonly content: string;
-      readonly partial: AssistantMessageLike;
-    }
-  | {
-      readonly type: "thinking_start";
-      readonly contentIndex: number;
-      readonly partial: AssistantMessageLike;
-    }
-  | {
-      readonly type: "thinking_delta";
-      readonly contentIndex: number;
-      readonly delta: string;
-      readonly partial: AssistantMessageLike;
-    }
-  | {
-      readonly type: "thinking_end";
-      readonly contentIndex: number;
-      readonly content: string;
-      readonly partial: AssistantMessageLike;
-    }
-  | {
-      readonly type: "toolcall_start";
-      readonly contentIndex: number;
-      readonly partial: AssistantMessageLike;
-    }
-  | {
-      readonly type: "toolcall_delta";
-      readonly contentIndex: number;
-      readonly delta: string;
-      readonly partial: AssistantMessageLike;
-    }
-  | {
-      readonly type: "toolcall_end";
-      readonly contentIndex: number;
-      readonly toolCall: JsonObject;
-      readonly partial: AssistantMessageLike;
-    }
-  | {
-      readonly type: "done";
-      readonly reason: AssistantMessageLike["stopReason"];
-      readonly message: AssistantMessageLike;
-    }
-  | {
-      readonly type: "error";
-      readonly reason: AssistantMessageLike["stopReason"];
-      readonly error: AssistantMessageLike;
-    };
-
-export interface AssistantMessageEventStreamLike extends AsyncIterable<AssistantMessageEvent> {
-  push(event: AssistantMessageEvent): void;
-  end(result?: AssistantMessageLike): void;
-  result(): Promise<AssistantMessageLike>;
-}
-
-class LocalAssistantMessageEventStream implements AssistantMessageEventStreamLike {
-  private queue: AssistantMessageEvent[] = [];
-  private waiting: Array<(result: IteratorResult<AssistantMessageEvent>) => void> = [];
-  private done = false;
-  private readonly finalResultPromise: Promise<AssistantMessageLike>;
-  private resolveFinalResult!: (value: AssistantMessageLike) => void;
-
-  constructor() {
-    this.finalResultPromise = new Promise((resolve) => {
-      this.resolveFinalResult = resolve;
-    });
-  }
-
-  push(event: AssistantMessageEvent): void {
-    if (this.done)
-      throw new Error("Anthropic attribution stream received an event after settlement");
-    if (event.type === "done") {
-      this.done = true;
-      this.resolveFinalResult(event.message);
-    } else if (event.type === "error") {
-      this.done = true;
-      this.resolveFinalResult(event.error);
-    }
-    const waiter = this.waiting.shift();
-    if (waiter) waiter({ value: event, done: false });
-    else this.queue.push(event);
-  }
-
-  end(result?: AssistantMessageLike): void {
-    this.done = true;
-    if (result !== undefined) this.resolveFinalResult(result);
-    while (this.waiting.length > 0) {
-      this.waiting.shift()?.({ value: undefined, done: true });
-    }
-  }
-
-  async *[Symbol.asyncIterator](): AsyncIterator<AssistantMessageEvent> {
-    for (;;) {
-      const queued = this.queue.shift();
-      if (queued) {
-        yield queued;
-      } else if (this.done) {
-        return;
-      } else {
-        const next = await new Promise<IteratorResult<AssistantMessageEvent>>((resolve) =>
-          this.waiting.push(resolve),
-        );
-        if (next.done) return;
-        yield next.value;
-      }
-    }
-  }
-
-  result(): Promise<AssistantMessageLike> {
-    return this.finalResultPromise;
-  }
-}
-
-function createAssistantMessageEventStream(): AssistantMessageEventStreamLike {
-  return new LocalAssistantMessageEventStream();
-}
+export type PiStreamContext = Context;
+export type PiToolLike = Tool;
+export type PiSimpleStreamOptions = SimpleStreamOptions;
+export type AssistantMessageLike = AssistantMessage;
+export type AssistantMessageEventStreamLike = AssistantMessageEventStream;
 
 function isPlainObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -556,17 +347,23 @@ export function resolveCacheRetentionPreference(
 }
 
 function anthropicCompatibility(model: PiModelLike): {
-  supportsLongCacheRetention: boolean;
-  supportsCacheControlOnTools: boolean;
+  supportsLongCacheRetention: boolean | undefined;
+  supportsCacheControlOnTools: boolean | undefined;
 } {
-  const compat = model.compat;
+  const compat: unknown = model.compat;
+  if (compat === undefined) {
+    return { supportsLongCacheRetention: undefined, supportsCacheControlOnTools: undefined };
+  }
   if (!isPlainObject(compat)) throw new Error("Anthropic model compat must be an object");
-  const supportsLongCacheRetention = compat.supportsLongCacheRetention;
-  const supportsCacheControlOnTools = compat.supportsCacheControlOnTools;
-  if (typeof supportsLongCacheRetention !== "boolean") {
+  const supportsLongCacheRetention = compat["supportsLongCacheRetention"];
+  const supportsCacheControlOnTools = compat["supportsCacheControlOnTools"];
+  if (supportsLongCacheRetention !== undefined && typeof supportsLongCacheRetention !== "boolean") {
     throw new Error("Anthropic model compat.supportsLongCacheRetention must be boolean");
   }
-  if (typeof supportsCacheControlOnTools !== "boolean") {
+  if (
+    supportsCacheControlOnTools !== undefined &&
+    typeof supportsCacheControlOnTools !== "boolean"
+  ) {
     throw new Error("Anthropic model compat.supportsCacheControlOnTools must be boolean");
   }
   return { supportsLongCacheRetention, supportsCacheControlOnTools };
@@ -579,7 +376,7 @@ function resolveAnthropicCacheControl(
   const retention = resolveCacheRetentionPreference(options);
   if (retention === "none") return undefined;
   const supportsLongCacheRetention = anthropicCompatibility(model).supportsLongCacheRetention;
-  if (retention === "long" && !supportsLongCacheRetention) {
+  if (retention === "long" && supportsLongCacheRetention === false) {
     throw new Error("Anthropic model does not support requested long cache retention");
   }
   const ttl = retention === "long" ? "1h" : undefined;
@@ -737,6 +534,21 @@ export function isAnthropicContext(ctx: AnthropicContextLike): boolean {
   return ctx.model?.provider === "anthropic";
 }
 
+function requireAnthropicModel(model: Model<Api> | undefined): PiModelLike {
+  if (model === undefined) throw new Error("Anthropic attribution requires an active model");
+  if (model.provider !== "anthropic") {
+    throw new Error(
+      `Anthropic attribution only accepts the anthropic provider; got ${String(model.provider)}`,
+    );
+  }
+  if (!hasApi(model, "anthropic-messages")) {
+    throw new Error(
+      `Anthropic attribution requires api anthropic-messages; got ${String(model.api)}`,
+    );
+  }
+  return model;
+}
+
 function getSessionId(ctx: AnthropicContextLike): string {
   const sessionId = ctx.sessionManager.getSessionId();
   if (typeof sessionId !== "string" || sessionId.trim().length === 0) {
@@ -838,22 +650,16 @@ export function registerAnthropicAttributionProvider(
   getSessionOverride: () => Exclude<CacheRetention, "none"> | undefined,
 ): void {
   if (!isAnthropicContext(ctx)) return;
-  if (ctx.model === undefined) throw new Error("Anthropic attribution requires an active model");
+  const activeModel = requireAnthropicModel(ctx.model);
+  const streamSimple: HostStreamSimple = (model, context, options) =>
+    streamAnthropicViaBetaMessages(requireAnthropicModel(model), context, {
+      ...options,
+      cacheRetention: resolveCacheRetentionPreference(options, getSessionOverride()),
+    });
   pi.registerProvider("anthropic", {
     api: "anthropic-messages",
-    headers: buildAnthropicAttributionHeaders(getSessionId(ctx), ctx.model),
-    streamSimple: ((
-      model: Parameters<HostStreamSimple>[0],
-      context: Parameters<HostStreamSimple>[1],
-      options: Parameters<HostStreamSimple>[2],
-    ) =>
-      streamAnthropicViaBetaMessages(model as PiModelLike, context as PiStreamContext, {
-        ...(options as PiSimpleStreamOptions | undefined),
-        cacheRetention: resolveCacheRetentionPreference(
-          options as PiSimpleStreamOptions | undefined,
-          getSessionOverride(),
-        ),
-      })) as unknown as HostStreamSimple,
+    headers: buildAnthropicAttributionHeaders(getSessionId(ctx), activeModel),
+    streamSimple,
   });
 }
 
@@ -1022,8 +828,7 @@ export function rewriteAnthropicRequestPayload(args: {
     throw new Error("Anthropic attribution expected payload.metadata to be an object when present");
   }
 
-  const model = args.ctx.model;
-  if (model === undefined) throw new Error("Anthropic attribution requires an active model");
+  const model = requireAnthropicModel(args.ctx.model);
   const policy = resolveClaudeCodeModelPolicy(model);
   const maxTokens =
     args.payload["max_tokens"] === undefined
@@ -1255,7 +1060,7 @@ function convertToolResultMessage(message: JsonObject, messageIndex: number): Js
 }
 
 function convertMessages(
-  messages: readonly PiMessage[],
+  messages: Context["messages"],
   cacheControl?: AnthropicCacheControl,
 ): JsonObject[] {
   const params: JsonObject[] = [];
@@ -1316,10 +1121,15 @@ function convertTools(
       throw new Error(`Anthropic attribution requires an object schema for tool ${tool.name}`);
     }
     const parameters = tool.parameters;
-    if (!isPlainObject(parameters["properties"]) || !Array.isArray(parameters["required"])) {
-      throw new Error(
-        `Anthropic attribution requires properties and required for tool ${tool.name}`,
-      );
+    if (parameters["type"] !== "object" || !isPlainObject(parameters["properties"])) {
+      throw new Error(`Anthropic attribution requires an object schema for tool ${tool.name}`);
+    }
+    const required = parameters["required"];
+    if (
+      required !== undefined &&
+      (!Array.isArray(required) || required.some((name) => typeof name !== "string"))
+    ) {
+      throw new Error(`Anthropic attribution tool ${tool.name} required must be a string array`);
     }
     if (tool.description !== undefined && typeof tool.description !== "string") {
       throw new Error(`Anthropic attribution tool ${tool.name} description must be a string`);
@@ -1327,11 +1137,7 @@ function convertTools(
     const converted: JsonObject = {
       name: tool.name,
       ...(tool.description === undefined ? {} : { description: tool.description }),
-      input_schema: {
-        type: "object",
-        properties: parameters["properties"],
-        required: parameters["required"],
-      },
+      input_schema: parameters,
     };
     return cacheControl !== undefined && index === tools.length - 1
       ? cloneBlockWithCacheControl(converted, cacheControl)
@@ -1349,10 +1155,9 @@ function thinkingBudgetFor(
     low: 4096,
     medium: 10240,
     high: 20480,
-    xhigh: 32768,
-    off: 0,
   } as const;
-  const requested = level === "off" ? 0 : (custom?.[level] ?? defaults[level]);
+  const budgetLevel = level === "xhigh" || level === "max" ? "high" : level;
+  const requested = custom?.[budgetLevel] ?? defaults[budgetLevel];
   if (requested >= maxTokens) {
     throw new Error("Anthropic attribution requires thinking budget below max tokens");
   }
@@ -1360,19 +1165,35 @@ function thinkingBudgetFor(
 }
 
 function adaptiveEffortFor(
-  level: Exclude<NonNullable<PiSimpleStreamOptions["reasoning"]>, "off">,
-): "low" | "medium" | "high" | "xhigh" {
+  level: NonNullable<PiSimpleStreamOptions["reasoning"]>,
+): "low" | "medium" | "high" | "xhigh" | "max" {
   switch (level) {
     case "low":
     case "medium":
     case "high":
     case "xhigh":
+    case "max":
       return level;
     case "minimal":
       throw new Error(
-        "Anthropic attribution cannot map Pi reasoning=minimal to Claude adaptive effort; use low, medium, high, or xhigh",
+        "Anthropic attribution cannot map Pi reasoning=minimal to Claude adaptive effort; use low, medium, high, xhigh, or max",
       );
   }
+}
+
+function resolveRequestMaxTokens(
+  model: PiModelLike,
+  requestedMaxTokens: number | undefined,
+): number {
+  const modelMaxTokens = resolveAnthropicMaxTokens(model);
+  if (requestedMaxTokens === undefined) return modelMaxTokens;
+  const requested = assertPositiveInteger(requestedMaxTokens, "maxTokens");
+  if (requested > modelMaxTokens) {
+    throw new Error(
+      `Anthropic attribution maxTokens ${String(requested)} exceeds model.maxTokens ${String(modelMaxTokens)}`,
+    );
+  }
+  return requested;
 }
 
 export function buildAnthropicRequestParams(
@@ -1381,7 +1202,7 @@ export function buildAnthropicRequestParams(
   options?: PiSimpleStreamOptions,
 ): JsonObject {
   const policy = resolveClaudeCodeModelPolicy(model);
-  const maxTokens = resolveAnthropicMaxTokens(model);
+  const maxTokens = resolveRequestMaxTokens(model, options?.maxTokens);
   const cacheControl = resolveAnthropicCacheControl(model, options);
   const params: JsonObject = {
     model: policy.modelId,
@@ -1407,13 +1228,9 @@ export function buildAnthropicRequestParams(
   );
   if (tools.length > 0) params["tools"] = tools;
   else params["tools"] = [];
-  if (options?.toolChoice !== undefined) params["tool_choice"] = options.toolChoice;
   const reasoning = options?.reasoning;
   if (model.reasoning && reasoning !== undefined) {
-    if (reasoning === "off") {
-      params["thinking"] = { type: "disabled" };
-      if (options?.temperature !== undefined) params["temperature"] = options.temperature;
-    } else if (policy.thinkingPolicy === "adaptive-effort") {
+    if (policy.thinkingPolicy === "adaptive-effort") {
       params["thinking"] = { type: "adaptive" };
       params["output_config"] = { effort: adaptiveEffortFor(reasoning) };
     } else {
@@ -1434,8 +1251,10 @@ function headersToRecord(headers: Headers): Record<string, string> {
   return Object.fromEntries([...headers.entries()]);
 }
 
-function lowerHeaderMap(headers: Record<string, string> | undefined): Record<string, string> {
-  const output: Record<string, string> = {};
+function lowerHeaderMap(
+  headers: Record<string, string | null> | undefined,
+): Record<string, string | null> {
+  const output: Record<string, string | null> = {};
   for (const [key, value] of Object.entries(headers ?? {})) output[key.toLowerCase()] = value;
   return output;
 }
@@ -1541,9 +1360,8 @@ function resolveModelCostRates(
   };
 }
 
-function optionalUsageInteger(usage: JsonObject, key: string): number | undefined {
+function requiredUsageInteger(usage: JsonObject, key: string): number {
   const value = usage[key];
-  if (value === undefined) return undefined;
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     throw new Error(
       `Anthropic attribution received malformed usage.${key}; expected a non-negative safe integer`,
@@ -1552,32 +1370,43 @@ function optionalUsageInteger(usage: JsonObject, key: string): number | undefine
   return value;
 }
 
+function nullableUsageInteger(usage: JsonObject, key: string): number | null {
+  const value = usage[key];
+  if (value === null) return null;
+  return requiredUsageInteger(usage, key);
+}
+
 export function updateAnthropicUsage(
   output: AssistantMessageLike,
-  usage: JsonObject | undefined,
+  usage: JsonObject,
   model: PiModelLike,
+  phase: "message_start" | "message_delta",
 ): void {
-  if (usage === undefined) return;
-  const inputTokens = optionalUsageInteger(usage, "input_tokens");
-  const outputTokens = optionalUsageInteger(usage, "output_tokens");
-  const cacheReadTokens = optionalUsageInteger(usage, "cache_read_input_tokens");
-  const cacheWriteTokens = optionalUsageInteger(usage, "cache_creation_input_tokens");
-  if (inputTokens !== undefined) output.usage.input = inputTokens;
-  if (outputTokens !== undefined) output.usage.output = outputTokens;
-  if (cacheReadTokens !== undefined) output.usage.cacheRead = cacheReadTokens;
-  const cacheCreation = usage["cache_creation"];
-  if (cacheCreation !== undefined && !isPlainObject(cacheCreation)) {
-    throw new Error("Anthropic attribution received malformed usage.cache_creation");
-  }
-  const reportedLongCacheWrite =
-    cacheCreation === undefined
-      ? undefined
-      : optionalUsageInteger(cacheCreation, "ephemeral_1h_input_tokens");
-  if (cacheWriteTokens !== undefined) {
-    output.usage.cacheWrite = cacheWriteTokens;
-    output.usage.cacheWrite1h = reportedLongCacheWrite === undefined ? 0 : reportedLongCacheWrite;
-  } else if (reportedLongCacheWrite !== undefined) {
-    output.usage.cacheWrite1h = reportedLongCacheWrite;
+  const inputTokens =
+    phase === "message_start"
+      ? requiredUsageInteger(usage, "input_tokens")
+      : nullableUsageInteger(usage, "input_tokens");
+  const outputTokens = requiredUsageInteger(usage, "output_tokens");
+  const cacheReadTokens = nullableUsageInteger(usage, "cache_read_input_tokens");
+  const cacheWriteTokens = nullableUsageInteger(usage, "cache_creation_input_tokens");
+  if (inputTokens !== null) output.usage.input = inputTokens;
+  output.usage.output = outputTokens;
+  if (cacheReadTokens !== null) output.usage.cacheRead = cacheReadTokens;
+  if (cacheWriteTokens !== null) output.usage.cacheWrite = cacheWriteTokens;
+
+  if (phase === "message_start") {
+    const cacheCreation = usage["cache_creation"];
+    if (cacheCreation !== null && !isPlainObject(cacheCreation)) {
+      throw new Error(
+        "Anthropic attribution received malformed usage.cache_creation; expected an object or null",
+      );
+    }
+    if (cacheCreation === null) {
+      output.usage.cacheWrite1h = 0;
+    } else {
+      output.usage.cacheWrite1h = requiredUsageInteger(cacheCreation, "ephemeral_1h_input_tokens");
+      requiredUsageInteger(cacheCreation, "ephemeral_5m_input_tokens");
+    }
   }
   const longCacheWrite = output.usage.cacheWrite1h ?? 0;
   if (
@@ -1702,7 +1531,7 @@ function createOutput(model: PiModelLike): AssistantMessageLike {
       totalTokens: 0,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     },
-    stopReason: "stop",
+    stopReason: "pending",
     timestamp: Date.now(),
   };
 }
@@ -1812,14 +1641,18 @@ function sseIndex(payload: JsonObject, eventName: string): number {
   return index;
 }
 
-function sseUsage(payload: JsonObject, eventName: string): JsonObject | undefined {
+function sseUsage(payload: JsonObject, eventName: string): JsonObject {
   const usage = payload["usage"];
-  if (usage === undefined) return undefined;
   if (!isPlainObject(usage)) {
-    throw new Error(`Anthropic beta messages SSE ${eventName} usage must be an object`);
+    throw new Error(`Anthropic beta messages SSE ${eventName} usage object is required`);
   }
   return usage;
 }
+
+type StreamingTextBlock = TextContent & { index?: number };
+type StreamingThinkingBlock = ThinkingContent & { index?: number };
+type StreamingToolCall = ToolCall & { index?: number; partialJson?: string };
+type StreamingBlock = StreamingTextBlock | StreamingThinkingBlock | StreamingToolCall;
 
 async function processAnthropicSse(
   response: Response,
@@ -1828,7 +1661,7 @@ async function processAnthropicSse(
   stream: AssistantMessageEventStreamLike,
   model: PiModelLike,
 ): Promise<void> {
-  const blocks = output.content as Array<JsonObject & { index?: number; partialJson?: string }>;
+  const blocks = output.content as unknown as StreamingBlock[];
   const activeBlocks = new Map<number, number>();
   const seenBlockIndices = new Set<number>();
   let sawMessageStart = false;
@@ -1861,7 +1694,12 @@ async function processAnthropicSse(
         throw new Error("Anthropic beta messages SSE message_start.message must be an object");
       }
       output.responseId = nonEmptyString(message["id"], "SSE message_start response id");
-      updateAnthropicUsage(output, sseUsage(message, "message_start.message"), model);
+      updateAnthropicUsage(
+        output,
+        sseUsage(message, "message_start.message"),
+        model,
+        "message_start",
+      );
       sawMessageStart = true;
       continue;
     }
@@ -1891,7 +1729,7 @@ async function processAnthropicSse(
         if (typeof text !== "string") {
           throw new Error("Anthropic beta messages SSE text content block requires text");
         }
-        output.content.push({ type: "text", text, index });
+        blocks.push({ type: "text", text, index });
         stream.push({
           type: "text_start",
           contentIndex: output.content.length - 1,
@@ -1905,7 +1743,7 @@ async function processAnthropicSse(
             "Anthropic beta messages SSE thinking content block requires thinking and signature",
           );
         }
-        output.content.push({
+        blocks.push({
           type: "thinking",
           thinking,
           thinkingSignature: signature,
@@ -1917,7 +1755,7 @@ async function processAnthropicSse(
           partial: output,
         });
       } else if (contentBlock["type"] === "redacted_thinking") {
-        output.content.push({
+        blocks.push({
           type: "thinking",
           thinking: "[Reasoning redacted]",
           thinkingSignature: nonEmptyString(
@@ -1936,7 +1774,7 @@ async function processAnthropicSse(
         if (!isPlainObject(contentBlock["input"])) {
           throw new Error("Anthropic beta messages SSE tool_use input must be an object");
         }
-        output.content.push({
+        blocks.push({
           type: "toolCall",
           id: nonEmptyString(contentBlock["id"], "SSE tool_use id"),
           name: nonEmptyString(contentBlock["name"], "SSE tool_use name"),
@@ -2000,7 +1838,7 @@ async function processAnthropicSse(
         }
         block.partialJson += partialJson;
         const partialArguments = parseStreamingJsonFragment(block.partialJson);
-        if (partialArguments !== undefined) block["arguments"] = partialArguments;
+        if (isPlainObject(partialArguments)) block.arguments = partialArguments;
         stream.push({
           type: "toolcall_delta",
           contentIndex: blockIndex,
@@ -2080,7 +1918,7 @@ async function processAnthropicSse(
       output.stopReason = mapStopReason(
         nonEmptyString(delta["stop_reason"], "SSE message_delta.stop_reason"),
       );
-      updateAnthropicUsage(output, sseUsage(event, "message_delta"), model);
+      updateAnthropicUsage(output, sseUsage(event, "message_delta"), model, "message_delta");
       sawMessageDelta = true;
       continue;
     }
@@ -2188,14 +2026,23 @@ export function streamAnthropicViaBetaMessages(
       if (options?.signal?.aborted) throw new Error("Request was aborted");
       activeAbortScope.close();
       activeAbortScope = undefined;
+      if (
+        output.stopReason !== "stop" &&
+        output.stopReason !== "length" &&
+        output.stopReason !== "toolUse"
+      ) {
+        throw new Error(
+          `Anthropic beta messages settled with invalid success reason ${String(output.stopReason)}`,
+        );
+      }
       stream.push({ type: "done", reason: output.stopReason, message: output });
       stream.end();
     } catch (error) {
       activeAbortScope?.close();
       activeAbortScope = undefined;
-      for (const block of output.content) {
-        delete block["index"];
-        delete block["partialJson"];
+      for (const block of output.content as unknown as StreamingBlock[]) {
+        delete block.index;
+        if (block.type === "toolCall") delete block.partialJson;
       }
       output.stopReason = options?.signal?.aborted ? "aborted" : "error";
       output.errorMessage = error instanceof Error ? error.message : String(error);

@@ -1,3 +1,6 @@
+import { Type } from "@earendil-works/pi-ai";
+import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ANTHROPIC_ATTRIBUTION_CLAIM_CHANNEL,
@@ -7,6 +10,7 @@ import {
   createAnthropicAttributionExtension,
   type PiModelLike,
   type PiSimpleStreamOptions,
+  type PiStreamContext,
   resolveCacheRetentionPreference,
   rewriteAnthropicRequestPayload,
   streamAnthropicViaBetaMessages,
@@ -24,30 +28,42 @@ afterEach(() => {
 });
 
 const anthropicModel: PiModelLike = {
-  provider: "anthropic",
-  id: "claude-sonnet-4-5",
-  maxTokens: 64_000,
-  reasoning: true,
-  compat: { supportsLongCacheRetention: true, supportsCacheControlOnTools: true },
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  ...ANTHROPIC_MODELS["claude-sonnet-4-5"],
+  compat: {
+    ...ANTHROPIC_MODELS["claude-sonnet-4-5"].compat,
+    supportsLongCacheRetention: true,
+    supportsCacheControlOnTools: true,
+  },
 };
 
-const pricedAnthropicModel: PiModelLike = {
-  ...anthropicModel,
-  cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+const pricedAnthropicModel: PiModelLike = anthropicModel;
+const zeroUsage = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
+const sessionManager = SessionManager.inMemory();
+const TEST_SESSION_ID = sessionManager.getSessionId();
+
+function userContext(content = "hello"): PiStreamContext {
+  return { messages: [{ role: "user", content, timestamp: 1 }] };
+}
 
 function context(provider = "anthropic"): AnthropicContextLike {
   return {
-    model: {
-      provider,
-      id: provider === "anthropic" ? "claude-sonnet-4-5" : "gpt-5.5",
-      maxTokens: 64_000,
-      reasoning: true,
-    },
-    sessionManager: {
-      getSessionId: () => "11111111-2222-4333-8444-555555555555",
-    },
+    model:
+      provider === "anthropic"
+        ? anthropicModel
+        : {
+            ...anthropicModel,
+            provider,
+            id: "gpt-5.5",
+            api: "openai-responses",
+          },
+    sessionManager,
   };
 }
 
@@ -107,11 +123,9 @@ describe("Anthropic request contracts", () => {
       /cache retention.*required/i,
     );
     expect(() =>
-      buildAnthropicRequestParams(
-        { ...anthropicModel, compat: undefined },
-        { messages: [{ role: "user", content: "hello" }] },
-        { cacheRetention: "short" },
-      ),
+      buildAnthropicRequestParams({ ...anthropicModel, compat: undefined }, userContext(), {
+        cacheRetention: "short",
+      }),
     ).not.toThrow();
     expect(() =>
       buildAnthropicRequestParams(
@@ -119,7 +133,7 @@ describe("Anthropic request contracts", () => {
           ...anthropicModel,
           compat: { supportsLongCacheRetention: false, supportsCacheControlOnTools: true },
         },
-        { messages: [{ role: "user", content: "hello" }] },
+        userContext(),
         { cacheRetention: "long" },
       ),
     ).toThrow(/long cache retention/);
@@ -138,11 +152,10 @@ describe("Anthropic request contracts", () => {
       ).toThrow(/cacheRetention/);
     }
     expect(() =>
-      buildAnthropicRequestParams(
-        anthropicModel,
-        { messages: [{ role: "user", content: "hello" }] },
-        { cacheRetention: "invalid" as never, env: {} },
-      ),
+      buildAnthropicRequestParams(anthropicModel, userContext(), {
+        cacheRetention: "invalid" as never,
+        env: {},
+      }),
     ).toThrow(/cacheRetention/);
   });
 
@@ -181,7 +194,11 @@ describe("Anthropic request contracts", () => {
       anthropicModel,
       {
         messages: [
-          { role: "user", content: `user ${nonBmp} ${high}A${low}${high}${low}` },
+          {
+            role: "user",
+            content: `user ${nonBmp} ${high}A${low}${high}${low}`,
+            timestamp: 1,
+          },
           {
             role: "assistant",
             content: [
@@ -192,12 +209,20 @@ describe("Anthropic request contracts", () => {
                 thinkingSignature: "signature",
               },
             ],
+            api: "anthropic-messages",
+            provider: "anthropic",
+            model: anthropicModel.id,
+            usage: zeroUsage,
+            stopReason: "stop",
+            timestamp: 2,
           },
           {
             role: "toolResult",
             toolCallId: "call-1",
+            toolName: "read",
             content: [{ type: "text", text: `tool ${nonBmp}` }],
             isError: false,
+            timestamp: 3,
           },
         ],
       },
@@ -266,7 +291,7 @@ describe("Anthropic request contracts", () => {
               role: "assistant",
               content: [{ type: "thinking", thinking: "reasoning without signature" }],
             },
-          ],
+          ] as never,
         },
         { cacheRetention: "none" },
       ),
@@ -279,22 +304,26 @@ describe("Anthropic request contracts", () => {
     ).toThrow(/at least one message/);
   });
 
-  it("does not invent missing tool descriptions or temperature options", () => {
+  it("preserves host tool descriptions without inventing temperature options", () => {
     const params = buildAnthropicRequestParams(
       anthropicModel,
       {
-        messages: [{ role: "user", content: "hello" }],
+        messages: [{ role: "user", content: "hello", timestamp: 1 }],
         tools: [
           {
             name: "read",
-            parameters: { type: "object", properties: {}, required: [] },
+            description: "Read a file",
+            parameters: Type.Object({}),
           },
         ],
       },
       { cacheRetention: "none" },
     );
     expect(params).not.toHaveProperty("temperature");
-    expect((params.tools as Array<Record<string, unknown>>)[0]).not.toHaveProperty("description");
+    expect((params.tools as Array<Record<string, unknown>>)[0]).toHaveProperty(
+      "description",
+      "Read a file",
+    );
   });
 
   it("requires a first user text for attribution instead of inventing an empty fingerprint input", () => {
@@ -441,9 +470,9 @@ function streamOptions(overrides: Partial<PiSimpleStreamOptions> = {}): PiSimple
     apiKey: "sk-ant-oat-test-token",
     cacheRetention: "none",
     onPayload: (payload) => ({
-      ...payload,
+      ...(payload as Record<string, unknown>),
       metadata: {
-        user_id: JSON.stringify({ session_id: "11111111-2222-4333-8444-555555555555" }),
+        user_id: JSON.stringify({ session_id: TEST_SESSION_ID }),
       },
     }),
     ...overrides,
@@ -455,11 +484,7 @@ async function streamedResult(
   options: PiSimpleStreamOptions = streamOptions(),
 ): Promise<Awaited<ReturnType<ReturnType<typeof streamAnthropicViaBetaMessages>["result"]>>> {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(body, { status: 200 })));
-  return streamAnthropicViaBetaMessages(
-    anthropicModel,
-    { messages: [{ role: "user", content: "hello" }] },
-    options,
-  ).result();
+  return streamAnthropicViaBetaMessages(anthropicModel, userContext(), options).result();
 }
 
 describe("Anthropic beta messages transport", () => {
@@ -568,11 +593,7 @@ describe("Anthropic beta messages transport", () => {
       vi.fn().mockResolvedValue(new Response(nullableNoCacheUsage, { status: 200 })),
     );
     await expect(
-      streamAnthropicViaBetaMessages(
-        pricedAnthropicModel,
-        { messages: [{ role: "user", content: "hello" }] },
-        streamOptions(),
-      ).result(),
+      streamAnthropicViaBetaMessages(pricedAnthropicModel, userContext(), streamOptions()).result(),
     ).resolves.toMatchObject({
       stopReason: "stop",
       usage: { input: 11, output: 7, cacheRead: 0, cacheWrite: 0, totalTokens: 18 },
@@ -606,7 +627,7 @@ describe("Anthropic beta messages transport", () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(body, { status: 200 })));
       const result = await streamAnthropicViaBetaMessages(
         pricedAnthropicModel,
-        { messages: [{ role: "user", content: "hello" }] },
+        userContext(),
         streamOptions(),
       ).result();
       expect(result.stopReason).toBe("error");
@@ -618,7 +639,10 @@ describe("Anthropic beta messages transport", () => {
     const malformedUsage = [
       sseEvent("message_start", {
         type: "message_start",
-        message: { id: "msg-1", usage: { input_tokens: "1" } },
+        message: {
+          id: "msg-1",
+          usage: { ...messageStartUsage, input_tokens: "1" },
+        },
       }),
       sseEvent("message_delta", {
         type: "message_delta",
@@ -632,7 +656,7 @@ describe("Anthropic beta messages transport", () => {
     );
     const usageResult = await streamAnthropicViaBetaMessages(
       pricedAnthropicModel,
-      { messages: [{ role: "user", content: "hello" }] },
+      userContext(),
       streamOptions(),
     ).result();
     expect(usageResult.stopReason).toBe("error");
@@ -657,7 +681,7 @@ describe("Anthropic beta messages transport", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(validUsage, { status: 200 })));
     const tierResult = await streamAnthropicViaBetaMessages(
       malformedTierModel,
-      { messages: [{ role: "user", content: "hello" }] },
+      userContext(),
       streamOptions(),
     ).result();
     expect(tierResult.stopReason).toBe("error");
@@ -690,7 +714,7 @@ describe("Anthropic beta messages transport", () => {
 
     const result = await streamAnthropicViaBetaMessages(
       anthropicModel,
-      { messages: [{ role: "user", content: "hello" }] },
+      userContext(),
       streamOptions({ maxRetries: 1 }),
     ).result();
 
@@ -707,7 +731,7 @@ describe("Anthropic beta messages transport", () => {
     vi.stubGlobal("fetch", retryable);
     const exhausted = await streamAnthropicViaBetaMessages(
       anthropicModel,
-      { messages: [{ role: "user", content: "hello" }] },
+      userContext(),
       streamOptions({ maxRetries: 2 }),
     ).result();
     expect(retryable).toHaveBeenCalledTimes(3);
@@ -720,7 +744,7 @@ describe("Anthropic beta messages transport", () => {
     vi.stubGlobal("fetch", nonRetryable);
     const rejected = await streamAnthropicViaBetaMessages(
       anthropicModel,
-      { messages: [{ role: "user", content: "hello" }] },
+      userContext(),
       streamOptions({ maxRetries: 2 }),
     ).result();
     expect(nonRetryable).toHaveBeenCalledTimes(1);
@@ -739,7 +763,7 @@ describe("Anthropic beta messages transport", () => {
 
     const result = await streamAnthropicViaBetaMessages(
       anthropicModel,
-      { messages: [{ role: "user", content: "hello" }] },
+      userContext(),
       streamOptions({ timeoutMs: 5 }),
     ).result();
 
@@ -753,12 +777,12 @@ describe("Anthropic beta messages transport", () => {
     vi.stubGlobal("fetch", fetchMock);
     const result = await streamAnthropicViaBetaMessages(
       anthropicModel,
-      { messages: [{ role: "user", content: "hello" }] },
+      userContext(),
       streamOptions({
         onPayload: (payload) => ({
-          ...payload,
+          ...(payload as Record<string, unknown>),
           metadata: {
-            user_id: JSON.stringify({ session_id: "11111111-2222-4333-8444-555555555555" }),
+            user_id: JSON.stringify({ session_id: TEST_SESSION_ID }),
           },
           unsupported: undefined,
         }),
@@ -776,7 +800,7 @@ describe("Anthropic beta messages transport", () => {
     for (const options of [{ timeoutMs: 0 }, { maxRetries: -1 }, { maxRetries: 1.5 }]) {
       const result = await streamAnthropicViaBetaMessages(
         anthropicModel,
-        { messages: [{ role: "user", content: "hello" }] },
+        userContext(),
         streamOptions(options),
       ).result();
       expect(result.stopReason).toBe("error");
@@ -821,7 +845,7 @@ describe("Anthropic attribution and sanitization", () => {
       user_id: JSON.stringify({
         account_uuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         device_id: "d".repeat(64),
-        session_id: "11111111-2222-4333-8444-555555555555",
+        session_id: TEST_SESSION_ID,
       }),
     });
   });
