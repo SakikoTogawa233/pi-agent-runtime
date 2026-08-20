@@ -29,6 +29,11 @@ const anthropicModel: PiModelLike = {
   reasoning: true,
 };
 
+const pricedAnthropicModel: PiModelLike = {
+  ...anthropicModel,
+  cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+};
+
 function context(provider = "anthropic"): AnthropicContextLike {
   return {
     model: {
@@ -310,6 +315,53 @@ describe("Anthropic beta messages transport", () => {
       expect(result.stopReason).toBe("error");
       expect(result.errorMessage).toMatch(/SSE|sequence|response id|content block/i);
     }
+  });
+
+  it("rejects malformed usage and cost tiers instead of ignoring them", async () => {
+    const malformedUsage = [
+      sseEvent("message_start", {
+        type: "message_start",
+        message: { id: "msg-1", usage: { input_tokens: "1" } },
+      }),
+      sseEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+      }),
+      sseEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(malformedUsage, { status: 200 })));
+    const usageResult = await streamAnthropicViaBetaMessages(
+      pricedAnthropicModel,
+      { messages: [{ role: "user", content: "hello" }] },
+      streamOptions(),
+    ).result();
+    expect(usageResult.stopReason).toBe("error");
+    expect(usageResult.errorMessage).toMatch(/input_tokens/);
+
+    const malformedTierModel: PiModelLike = {
+      ...pricedAnthropicModel,
+      cost: {
+        ...pricedAnthropicModel.cost,
+        tiers: [
+          {
+            inputTokensAbove: "100" as never,
+            input: 6,
+            output: 30,
+            cacheRead: 0.6,
+            cacheWrite: 7.5,
+          },
+        ],
+      },
+    };
+    const validUsage = malformedUsage.replace('"input_tokens":"1"', '"input_tokens":1');
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(validUsage, { status: 200 })));
+    const tierResult = await streamAnthropicViaBetaMessages(
+      malformedTierModel,
+      { messages: [{ role: "user", content: "hello" }] },
+      streamOptions(),
+    ).result();
+    expect(tierResult.stopReason).toBe("error");
+    expect(tierResult.errorMessage).toMatch(/inputTokensAbove/);
   });
 
   it("rejects EOF without message_stop and an unterminated final SSE record", async () => {
