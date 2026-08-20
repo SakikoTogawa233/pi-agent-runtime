@@ -1815,7 +1815,14 @@ async function fetchAnthropicResponse(input: {
     }
     if (retryableHttpStatus(response.status) && attempt < input.maxRetries) {
       const errorMessage = `Anthropic beta messages request failed: HTTP ${String(response.status)} ${response.statusText}`;
-      const delay = retryDelayMs(response.headers, attempt, input.maxRetryDelayMs, errorMessage);
+      let delay: number;
+      try {
+        delay = retryDelayMs(response.headers, attempt, input.maxRetryDelayMs, errorMessage);
+      } catch (error) {
+        await response.body?.cancel();
+        abortScope.close();
+        throw error;
+      }
       await response.body?.cancel();
       abortScope.close();
       attempt += 1;
