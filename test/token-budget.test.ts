@@ -10,6 +10,7 @@ import {
   TOKEN_BUDGET_DENSE_ASCII_WHITESPACE_THRESHOLD_X10000,
   TOKEN_BUDGET_FAMILY_CALIBRATIONS,
   TOKEN_BUDGET_HAIRCUT_BASIS_POINTS,
+  TOKEN_BUDGET_RATE_SCALE,
   unknownOutputContractSegment,
   utf8ByteClassBreakdown,
 } from "../src/token-budget.js";
@@ -72,7 +73,8 @@ describe("token estimation", () => {
       dense_bytes: 0,
       unknown_output_contract_bytes: 100,
     });
-    expect(estimate.tokens).toBe(616);
+    expect(estimate.perSegment[0]?.multibyte_rate_bytes_per_token_x100).toBe(100);
+    expect(estimate.tokens).toBe(617);
   });
 
   it("keeps segmentation invariant and freezes dense and multibyte forecasts", () => {
@@ -160,6 +162,43 @@ describe("token estimation", () => {
     expect(multibyte.advisory.input_tokens_if_multibyte_used_provable_ceiling).toBe(100_512);
   });
 
+  it("uses the one-byte ceiling for multilingual and supplementary Unicode admission", () => {
+    for (const profile of ["strict-launch", "strict-runtime", "provable"] as const) {
+      const exact = estimateInputTokens({
+        family: "openai-codex",
+        profile,
+        allowedInputTokens: 516,
+        calibrationBacked: true,
+        familyResolution: "model_override",
+        segments: [knownTextSegment("😀")],
+      });
+      expect(exact.tokens, profile).toBe(516);
+      expect(exact.perSegment[0]?.multibyte_rate_bytes_per_token_x100, profile).toBe(100);
+      expect(
+        estimateInputTokens({
+          family: "openai-codex",
+          profile,
+          allowedInputTokens: 516,
+          calibrationBacked: true,
+          familyResolution: "model_override",
+          segments: [knownTextSegment("😀a")],
+        }).tokens,
+        profile,
+      ).toBe(517);
+      expect(
+        estimateInputTokens({
+          family: "openai-codex",
+          profile,
+          allowedInputTokens: 522,
+          calibrationBacked: true,
+          familyResolution: "model_override",
+          segments: [knownTextSegment("你好😀")],
+        }).tokens,
+        profile,
+      ).toBe(522);
+    }
+  });
+
   it("keeps the strict-runtime affine boundary exact", () => {
     const allowedInputTokens = 100_000;
     const bytes = maxKnownTextBytesForTokens({
@@ -181,6 +220,46 @@ describe("token estimation", () => {
       }).tokens;
     expect(estimate(bytes)).toBe(allowedInputTokens);
     expect(estimate(bytes + 1)).toBe(allowedInputTokens + 1);
+  });
+
+  it("derives calibrated text capacity without a synthetic zero-byte admission failure", () => {
+    for (const family of ["anthropic", "openai-codex"] as const) {
+      const allowedInputTokens = 231_040;
+      const calibration = TOKEN_BUDGET_FAMILY_CALIBRATIONS[family];
+      const bytes = maxKnownTextBytesForTokens({
+        family,
+        allowedInputTokens,
+        profile: "calibrated",
+        calibrationBacked: true,
+        familyResolution: "model_override",
+      });
+      expect(bytes).toBe(
+        Math.floor(
+          ((allowedInputTokens - calibration.affine_f_tokens) *
+            calibration.rate_bytes_per_token_x100) /
+            TOKEN_BUDGET_RATE_SCALE,
+        ),
+      );
+      const estimate = (size: number) =>
+        estimateInputTokens({
+          family,
+          profile: "calibrated",
+          allowedInputTokens,
+          calibrationBacked: true,
+          familyResolution: "model_override",
+          segments: [
+            {
+              kind: "known_text",
+              bytes: size,
+              multibyteBytes: 0,
+              denseBytes: 0,
+              asciiWhitespaceBytes: 1_000,
+            },
+          ],
+        }).tokens;
+      expect(estimate(bytes), family).toBe(allowedInputTokens);
+      expect(estimate(bytes + 1), family).toBe(allowedInputTokens + 1);
+    }
   });
 
   it("resolves only the frozen backed model set and fails malformed arithmetic loudly", () => {
