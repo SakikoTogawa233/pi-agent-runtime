@@ -350,14 +350,20 @@ export function resolveCacheRetentionPreference(
 function anthropicCompatibility(model: PiModelLike): {
   supportsLongCacheRetention: boolean | undefined;
   supportsCacheControlOnTools: boolean | undefined;
+  supportsTemperature: boolean | undefined;
 } {
   const compat: unknown = model.compat;
   if (compat === undefined) {
-    return { supportsLongCacheRetention: undefined, supportsCacheControlOnTools: undefined };
+    return {
+      supportsLongCacheRetention: undefined,
+      supportsCacheControlOnTools: undefined,
+      supportsTemperature: undefined,
+    };
   }
   if (!isPlainObject(compat)) throw new Error("Anthropic model compat must be an object");
   const supportsLongCacheRetention = compat["supportsLongCacheRetention"];
   const supportsCacheControlOnTools = compat["supportsCacheControlOnTools"];
+  const supportsTemperature = compat["supportsTemperature"];
   if (supportsLongCacheRetention !== undefined && typeof supportsLongCacheRetention !== "boolean") {
     throw new Error("Anthropic model compat.supportsLongCacheRetention must be boolean");
   }
@@ -367,7 +373,10 @@ function anthropicCompatibility(model: PiModelLike): {
   ) {
     throw new Error("Anthropic model compat.supportsCacheControlOnTools must be boolean");
   }
-  return { supportsLongCacheRetention, supportsCacheControlOnTools };
+  if (supportsTemperature !== undefined && typeof supportsTemperature !== "boolean") {
+    throw new Error("Anthropic model compat.supportsTemperature must be boolean");
+  }
+  return { supportsLongCacheRetention, supportsCacheControlOnTools, supportsTemperature };
 }
 
 function resolveAnthropicCacheControl(
@@ -1246,8 +1255,13 @@ export function buildAnthropicRequestParams(
       };
     }
   } else {
-    params["thinking"] = { type: "disabled" };
-    if (options?.temperature !== undefined) params["temperature"] = options.temperature;
+    if (model.thinkingLevelMap?.off !== null) params["thinking"] = { type: "disabled" };
+    if (options?.temperature !== undefined) {
+      if (compatibility.supportsTemperature === false) {
+        throw new Error(`Anthropic attribution temperature is not supported by model ${model.id}`);
+      }
+      params["temperature"] = options.temperature;
+    }
   }
   assertCacheControlBreakpointLimit(params);
   return params;
@@ -1324,16 +1338,34 @@ function buildFetchHeaders(
   return Object.fromEntries([...headers.values()].map(({ name, value }) => [name, value]));
 }
 
-function mapStopReason(reason: unknown): AssistantMessageLike["stopReason"] {
+function mapStopReason(
+  reason: unknown,
+  stopDetails: unknown,
+): {
+  readonly stopReason: "stop" | "length" | "toolUse" | "error";
+  readonly errorMessage?: string;
+} {
   switch (reason) {
     case "end_turn":
     case "pause_turn":
     case "stop_sequence":
-      return "stop";
+      return { stopReason: "stop" };
     case "max_tokens":
-      return "length";
+      return { stopReason: "length" };
     case "tool_use":
-      return "toolUse";
+      return { stopReason: "toolUse" };
+    case "refusal": {
+      const explanation = isPlainObject(stopDetails) ? stopDetails["explanation"] : undefined;
+      return {
+        stopReason: "error",
+        errorMessage:
+          typeof explanation === "string" && explanation.length > 0
+            ? explanation
+            : "The model refused to complete the request",
+      };
+    }
+    case "sensitive":
+      return { stopReason: "error", errorMessage: "Provider stopped with: sensitive" };
     default:
       throw new Error(`Anthropic attribution received unknown stop reason: ${String(reason)}`);
   }
@@ -1961,10 +1993,16 @@ async function processAnthropicSse(
       if (!isPlainObject(delta)) {
         throw new Error("Anthropic beta messages SSE message_delta.delta must be an object");
       }
-      output.stopReason = mapStopReason(
+      const mappedStopReason = mapStopReason(
         nonEmptyString(delta["stop_reason"], "SSE message_delta.stop_reason"),
+        delta["stop_details"],
       );
+      output.stopReason = mappedStopReason.stopReason;
+      output.errorMessage = mappedStopReason.errorMessage;
       updateAnthropicUsage(output, sseUsage(event, "message_delta"), model, "message_delta");
+      if (mappedStopReason.errorMessage !== undefined) {
+        throw new Error(mappedStopReason.errorMessage);
+      }
       sawMessageDelta = true;
       continue;
     }
@@ -1986,18 +2024,13 @@ async function processAnthropicSse(
 }
 
 export function streamAnthropicViaBetaMessages(
-  model: PiModelLike,
+  model: Model<Api>,
   context: PiStreamContext,
   options?: PiSimpleStreamOptions,
 ): AssistantMessageEventStreamLike {
+  const anthropicModel = requireAnthropicModel(model);
   const stream = createAssistantMessageEventStream();
-  const output = createOutput(model);
-
-  if (model.provider !== "anthropic") {
-    throw new Error(
-      `Anthropic attribution only accepts the anthropic provider; got ${String(model.provider)}`,
-    );
-  }
+  const output = createOutput(anthropicModel);
 
   void (async () => {
     let activeAbortScope: RequestAbortScope | undefined;
@@ -2014,9 +2047,9 @@ export function streamAnthropicViaBetaMessages(
         );
       }
 
-      const policy = resolveClaudeCodeModelPolicy(model);
-      let params = buildAnthropicRequestParams(model, context, options);
-      const nextParams = await options?.onPayload?.(params, model);
+      const policy = resolveClaudeCodeModelPolicy(anthropicModel);
+      let params = buildAnthropicRequestParams(anthropicModel, context, options);
+      const nextParams = await options?.onPayload?.(params, anthropicModel);
       if (nextParams !== undefined) {
         if (!isPlainObject(nextParams))
           throw new Error("Anthropic attribution onPayload returned a non-object payload");
@@ -2037,15 +2070,18 @@ export function streamAnthropicViaBetaMessages(
         );
 
       const configuredTransport = transportOptions(options);
-      if (typeof model.baseUrl !== "string" || model.baseUrl.trim().length === 0) {
+      if (
+        typeof anthropicModel.baseUrl !== "string" ||
+        anthropicModel.baseUrl.trim().length === 0
+      ) {
         throw new Error("Anthropic attribution model.baseUrl resolved endpoint is required");
       }
-      const baseUrl = model.baseUrl.replace(/\/+$/, "");
+      const baseUrl = anthropicModel.baseUrl.replace(/\/+$/, "");
       if (baseUrl.length === 0) {
         throw new Error("Anthropic attribution model.baseUrl resolved endpoint is required");
       }
       const url = `${baseUrl}/v1/messages?beta=true`;
-      const headers = buildFetchHeaders(model, options, apiKey, sessionId, policy.beta);
+      const headers = buildFetchHeaders(anthropicModel, options, apiKey, sessionId, policy.beta);
       const requestInit: RequestInit = {
         method: "POST",
         headers,
@@ -2063,7 +2099,7 @@ export function streamAnthropicViaBetaMessages(
       activeAbortScope = fetched.abortScope;
       await options?.onResponse?.(
         { status: response.status, headers: headersToRecord(response.headers) },
-        model,
+        anthropicModel,
       );
       if (!response.ok) {
         throw new Error(
@@ -2072,7 +2108,7 @@ export function streamAnthropicViaBetaMessages(
       }
 
       stream.push({ type: "start", partial: output });
-      await processAnthropicSse(response, activeAbortScope.signal, output, stream, model);
+      await processAnthropicSse(response, activeAbortScope.signal, output, stream, anthropicModel);
       if (options?.signal?.aborted) throw new Error("Request was aborted");
       activeAbortScope.close();
       activeAbortScope = undefined;

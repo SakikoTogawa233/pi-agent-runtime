@@ -5,7 +5,6 @@ import type {
   CacheRetention as HostCacheRetention,
   Model,
   SimpleStreamOptions,
-  StreamFunction,
   Tool,
 } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels, Type } from "@earendil-works/pi-ai";
@@ -42,11 +41,8 @@ type _StreamMatchesHost = Expect<
   Equal<AssistantMessageEventStreamLike, AssistantMessageEventStream>
 >;
 type _CacheRetentionMatchesHost = Expect<Equal<CacheRetention, HostCacheRetention>>;
-type _AnthropicTransportMatchesHostApi = Expect<
-  Equal<
-    typeof streamAnthropicViaBetaMessages,
-    StreamFunction<"anthropic-messages", SimpleStreamOptions>
-  >
+type _TransportMatchesProviderHost = Expect<
+  Equal<typeof streamAnthropicViaBetaMessages, NonNullable<ProviderConfig["streamSimple"]>>
 >;
 const hostProviderTransport: NonNullable<ProviderConfig["streamSimple"]> =
   streamAnthropicViaBetaMessages;
@@ -101,26 +97,22 @@ describe("Pi 0.84.2 Anthropic host compatibility", () => {
   });
 
   it("honors installed off and temperature capability semantics", () => {
-    const fable = buildAnthropicRequestParams(
-      ANTHROPIC_MODELS["claude-fable-5"],
-      catalogContext,
-      { cacheRetention: "none" },
-    );
+    const fable = buildAnthropicRequestParams(ANTHROPIC_MODELS["claude-fable-5"], catalogContext, {
+      cacheRetention: "none",
+    });
     expect(fable).not.toHaveProperty("thinking");
 
     expect(() =>
-      buildAnthropicRequestParams(
-        ANTHROPIC_MODELS["claude-opus-4-7"],
-        catalogContext,
-        { cacheRetention: "none", temperature: 0.5 },
-      ),
+      buildAnthropicRequestParams(ANTHROPIC_MODELS["claude-opus-4-7"], catalogContext, {
+        cacheRetention: "none",
+        temperature: 0.5,
+      }),
     ).toThrow(/temperature.*not support/i);
     expect(
-      buildAnthropicRequestParams(
-        ANTHROPIC_MODELS["claude-sonnet-4-5"],
-        catalogContext,
-        { cacheRetention: "none", temperature: 0.5 },
-      ).temperature,
+      buildAnthropicRequestParams(ANTHROPIC_MODELS["claude-sonnet-4-5"], catalogContext, {
+        cacheRetention: "none",
+        temperature: 0.5,
+      }).temperature,
     ).toBe(0.5);
   });
 
