@@ -276,9 +276,9 @@ export function spawnPiChild(input: SpawnPiChildInput): PiChildCapture {
   child.stderr.on("data", (chunk: Buffer | string) => {
     stderrChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8"));
   });
-  child.stdin.end(input.stdin);
   const completed = new Promise<PiChildCompletion>((resolvePromise, reject) => {
     child.once("error", reject);
+    child.stdin.on("error", reject);
     child.once("close", (code, signal) => {
       resolvePromise({
         code,
@@ -287,6 +287,7 @@ export function spawnPiChild(input: SpawnPiChildInput): PiChildCapture {
         stderr: Buffer.concat(stderrChunks),
       });
     });
+    child.stdin.end(input.stdin);
   });
   return { child, completed };
 }

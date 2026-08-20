@@ -237,6 +237,7 @@ async function writeWithOperations(
   if (result.primaryFailure !== undefined) {
     throwDurable(result.primaryFailure, result.cleanupFailures, path, undefined, false);
   }
+  await syncParentDirectory(operations, path, undefined, false);
 }
 
 async function writePrivateWithOperations(
@@ -254,12 +255,14 @@ async function writePrivateWithOperations(
   if (result.primaryFailure !== undefined) {
     throwDurable(result.primaryFailure, result.cleanupFailures, path, undefined, false);
   }
+  await syncParentDirectory(operations, path, undefined, false);
 }
 
-async function syncDirectoryAfterRename(
+async function syncParentDirectory(
   operations: DurableFileOperations,
   targetPath: string,
-  temporaryPath: string,
+  temporaryPath: string | undefined,
+  renameCompleted: boolean,
 ): Promise<void> {
   if (operations.platform === "win32") return;
   const directoryPath = dirname(targetPath);
@@ -272,12 +275,18 @@ async function syncDirectoryAfterRename(
       [],
       targetPath,
       temporaryPath,
-      true,
+      renameCompleted,
     );
   }
   const result = await syncCloseDirectory(handle, directoryPath);
   if (result.primaryFailure !== undefined) {
-    throwDurable(result.primaryFailure, result.cleanupFailures, targetPath, temporaryPath, true);
+    throwDurable(
+      result.primaryFailure,
+      result.cleanupFailures,
+      targetPath,
+      temporaryPath,
+      renameCompleted,
+    );
   }
 }
 
@@ -316,7 +325,7 @@ async function replaceWithOperations(
       false,
     );
   }
-  await syncDirectoryAfterRename(operations, path, temporaryPath);
+  await syncParentDirectory(operations, path, temporaryPath, true);
 }
 
 /**
