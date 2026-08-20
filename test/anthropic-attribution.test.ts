@@ -151,9 +151,9 @@ describe("Anthropic request contracts", () => {
       "none",
     );
     vi.stubEnv("PI_CACHE_RETENTION", "short");
-    expect(() =>
-      resolveCacheRetentionPreference({ env: { PI_CACHE_RETENTION: "LONG" } }),
-    ).toThrow(/PI_CACHE_RETENTION/);
+    expect(() => resolveCacheRetentionPreference({ env: { PI_CACHE_RETENTION: "LONG" } })).toThrow(
+      /PI_CACHE_RETENTION/,
+    );
     for (const invalid of ["", "LONG", "invalid", null, 1]) {
       expect(() =>
         resolveCacheRetentionPreference({ cacheRetention: invalid as never, env: {} }),

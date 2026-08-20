@@ -1450,7 +1450,9 @@ function validateExpectedAnthropicAttribution(
   Reflect.deleteProperty(payload, ANTHROPIC_ATTRIBUTION_PROOF);
   const expected = decodeAnthropicAttributionProof(proof);
   if (expectedSessionId !== undefined && expected.sessionId !== expectedSessionId) {
-    throw new Error("Anthropic attribution expected session identity does not match request session");
+    throw new Error(
+      "Anthropic attribution expected session identity does not match request session",
+    );
   }
   const metadata = payload["metadata"];
   if (!isPlainObject(metadata) || typeof metadata["user_id"] !== "string") {
@@ -1459,7 +1461,9 @@ function validateExpectedAnthropicAttribution(
   const identity = parseJsonObject(metadata["user_id"], "Anthropic attribution metadata.user_id");
   const identityKeys = Object.keys(identity).sort();
   if (identityKeys.join(",") !== "account_uuid,device_id,session_id") {
-    throw new Error("Anthropic attribution metadata.user_id must contain the exact attribution identity");
+    throw new Error(
+      "Anthropic attribution metadata.user_id must contain the exact attribution identity",
+    );
   }
   if (identity["account_uuid"] !== expected.accountUuid) {
     throw new Error("Anthropic attribution account_uuid must match the expected attribution value");
@@ -1478,7 +1482,9 @@ function validateExpectedAnthropicAttribution(
     throw new Error("Anthropic attribution billing identity must remain the exact expected value");
   }
   if (!sameJsonValue(system[1], expected.identityBlocks[1])) {
-    throw new Error("Anthropic attribution required system identity must remain the exact expected value");
+    throw new Error(
+      "Anthropic attribution required system identity must remain the exact expected value",
+    );
   }
   if (
     !isPlainObject(system[0]) ||
@@ -1932,7 +1938,12 @@ function retryableHttpResponse(response: Response): boolean {
   const shouldRetry = response.headers.get("x-should-retry");
   if (shouldRetry === "true") return true;
   if (shouldRetry === "false") return false;
-  return response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500;
+  return (
+    response.status === 408 ||
+    response.status === 409 ||
+    response.status === 429 ||
+    response.status >= 500
+  );
 }
 
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;

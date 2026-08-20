@@ -864,9 +864,7 @@ export function maxKnownTextBytesForTokens(input: {
   if (variableTokens <= 0) {
     throw new RangeError("allowedInputTokens must exceed the affine token reserve");
   }
-  return Math.floor(
-    (variableTokens * capacity.rateBytesPerTokenX100) / TOKEN_BUDGET_RATE_SCALE,
-  );
+  return Math.floor((variableTokens * capacity.rateBytesPerTokenX100) / TOKEN_BUDGET_RATE_SCALE);
 }
 
 export interface RouteReserves {
