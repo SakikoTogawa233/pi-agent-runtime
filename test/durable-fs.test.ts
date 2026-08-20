@@ -246,9 +246,7 @@ describe("path containment", () => {
     expect(resolveContainedPath(root, "future/nested/new.json")).toBe(
       join(root, "future/nested/new.json"),
     );
-    expect(resolveContainedPath(root, "inside-link/new.json")).toBe(
-      join(root, "inside-link/new.json"),
-    );
+    expect(resolveContainedPath(root, "inside-link/new.json")).toBe(join(directory, "new.json"));
   });
 
   it("rejects existing symlink components that redirect new or existing paths outside the root", async () => {
@@ -256,9 +254,11 @@ describe("path containment", () => {
     const outside = await tempDir();
     await writeFile(join(outside, "existing.json"), "outside");
     await symlink(outside, join(root, "escape"), "dir");
+    await symlink(join(outside, "existing.json"), join(root, "file-link"));
 
     expect(() => resolveContainedPath(root, "escape/new.json")).toThrow(/stay inside/);
     expect(() => resolveContainedPath(root, "escape/existing.json")).toThrow(/stay inside/);
+    expect(() => resolveContainedPath(root, "file-link")).toThrow(/stay inside/);
     expect(await readdir(outside)).toEqual(["existing.json"]);
   });
 
