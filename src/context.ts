@@ -582,10 +582,6 @@ function entriesById(entries: readonly SessionEntry[]): Map<string, SessionEntry
   return byId;
 }
 
-function recordOf(value: unknown): JsonObject | undefined {
-  return isJsonObject(value) ? value : undefined;
-}
-
 function messageContainsToolCall(
   message: JsonObject,
   toolCallId: string | undefined,
@@ -593,11 +589,15 @@ function messageContainsToolCall(
 ): boolean {
   if (message["role"] !== "assistant") return false;
   const content = message["content"];
-  if (!Array.isArray(content)) return false;
+  if (!Array.isArray(content)) {
+    throw new Error("agent runtime parent assistant message leaf content must be an array");
+  }
   return content.some((part) => {
-    const record = recordOf(part);
-    if (record === undefined || record["type"] !== "toolCall") return false;
-    return toolCallId === undefined ? record["name"] === toolName : record["id"] === toolCallId;
+    if (!isJsonObject(part)) {
+      throw new Error("agent runtime parent assistant message leaf contains a malformed block");
+    }
+    if (part["type"] !== "toolCall") return false;
+    return toolCallId === undefined ? part["name"] === toolName : part["id"] === toolCallId;
   });
 }
 
@@ -612,11 +612,10 @@ export function resolveEffectiveLeaf(
   if (leaf === undefined || leaf.type !== "message") {
     return { leafId: sessionManager.getLeafId(), activeToolCallLeafExcluded: false };
   }
-  const message = recordOf(leaf.message);
-  if (
-    message !== undefined &&
-    messageContainsToolCall(message, options.toolCallId, options.toolName)
-  ) {
+  if (!isJsonObject(leaf.message)) {
+    throw new Error("agent runtime parent message leaf must contain a message object");
+  }
+  if (messageContainsToolCall(leaf.message, options.toolCallId, options.toolName)) {
     return { leafId: leaf.parentId, activeToolCallLeafExcluded: true };
   }
   return { leafId: sessionManager.getLeafId(), activeToolCallLeafExcluded: false };

@@ -7,6 +7,7 @@ import type {
   ExtensionFactory,
   ProviderConfig,
 } from "@earendil-works/pi-coding-agent";
+import { assertJsonValue } from "./json-value.js";
 
 export const CLAUDE_CODE_SESSION_HEADER = "X-Claude-Code-Session-Id";
 
@@ -895,11 +896,12 @@ function isClaudeCodeIdentityText(text: string): boolean {
   );
 }
 
-function normalizeSystemBlock(block: unknown): unknown {
-  if (!isPlainObject(block)) return block;
+function normalizeSystemBlock(block: unknown): JsonObject {
+  if (!isPlainObject(block) || block["type"] !== "text" || typeof block["text"] !== "string") {
+    throw new Error("Anthropic attribution system block must be a text object");
+  }
   const next = { ...block };
-  if (typeof next["text"] === "string")
-    next["text"] = stripAnthropicSystemPromptBadLines(next["text"]);
+  next["text"] = stripAnthropicSystemPromptBadLines(next["text"] as string);
   if (next["cache_control"] !== undefined)
     next["cache_control"] = cloneAnthropicCacheControl(next["cache_control"]);
   return next;
@@ -1321,9 +1323,12 @@ function convertTools(
         `Anthropic attribution requires properties and required for tool ${tool.name}`,
       );
     }
+    if (tool.description !== undefined && typeof tool.description !== "string") {
+      throw new Error(`Anthropic attribution tool ${tool.name} description must be a string`);
+    }
     const converted: JsonObject = {
       name: tool.name,
-      description: tool.description ?? "",
+      ...(tool.description === undefined ? {} : { description: tool.description }),
       input_schema: {
         type: "object",
         properties: parameters["properties"],
@@ -1409,7 +1414,7 @@ export function buildAnthropicRequestParams(
   if (model.reasoning && reasoning !== undefined) {
     if (reasoning === "off") {
       params["thinking"] = { type: "disabled" };
-      params["temperature"] = options?.temperature ?? 1;
+      if (options?.temperature !== undefined) params["temperature"] = options.temperature;
     } else if (policy.thinkingPolicy === "adaptive-effort") {
       params["thinking"] = { type: "adaptive" };
       params["output_config"] = { effort: adaptiveEffortFor(reasoning) };
@@ -1421,7 +1426,7 @@ export function buildAnthropicRequestParams(
     }
   } else {
     params["thinking"] = { type: "disabled" };
-    params["temperature"] = options?.temperature ?? 1;
+    if (options?.temperature !== undefined) params["temperature"] = options.temperature;
   }
   assertCacheControlBreakpointLimit(params);
   return params;
@@ -1440,7 +1445,7 @@ function lowerHeaderMap(headers: Record<string, string> | undefined): Record<str
 function buildFetchHeaders(
   options: PiSimpleStreamOptions | undefined,
   apiKey: string,
-  sessionHeader: string | undefined,
+  sessionHeader: string,
   beta: string,
 ): Record<string, string> {
   const optionHeaders = lowerHeaderMap(options?.headers);
@@ -1449,7 +1454,7 @@ function buildFetchHeaders(
     Authorization: `Bearer ${apiKey}`,
     "Content-Type": "application/json",
     "User-Agent": optionHeaders["user-agent"] ?? CLAUDE_CODE_USER_AGENT,
-    [CLAUDE_CODE_SESSION_HEADER]: sessionHeader ?? optionHeaders["x-claude-code-session-id"] ?? "",
+    [CLAUDE_CODE_SESSION_HEADER]: sessionHeader,
     "anthropic-beta": beta,
     "anthropic-dangerous-direct-browser-access": "true",
     "anthropic-version": "2023-06-01",
@@ -2103,6 +2108,7 @@ export function streamAnthropicViaBetaMessages(
           throw new Error("Anthropic attribution onPayload returned a non-object payload");
         params = nextParams;
       }
+      assertJsonValue(params);
       const metadataUserId = isPlainObject(params["metadata"])
         ? params["metadata"]["user_id"]
         : undefined;

@@ -29,11 +29,6 @@ const anthropicModel: PiModelLike = {
   reasoning: true,
 };
 
-const pricedAnthropicModel: PiModelLike = {
-  ...anthropicModel,
-  cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-};
-
 function context(provider = "anthropic"): AnthropicContextLike {
   return {
     model: {
