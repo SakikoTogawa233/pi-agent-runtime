@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -233,6 +233,35 @@ describe("private durable files", () => {
 });
 
 describe("path containment", () => {
+  it("accepts existing, new, and internally symlinked child paths", async () => {
+    const root = await tempDir();
+    const directory = join(root, "artifacts");
+    const existing = join(directory, "existing.json");
+    await mkdir(directory);
+    await writeFile(existing, "existing");
+    await symlink(directory, join(root, "inside-link"), "dir");
+
+    expect(resolveContainedPath(root, "artifacts/existing.json")).toBe(existing);
+    expect(resolveContainedPath(root, "artifacts/new.json")).toBe(join(directory, "new.json"));
+    expect(resolveContainedPath(root, "future/nested/new.json")).toBe(
+      join(root, "future/nested/new.json"),
+    );
+    expect(resolveContainedPath(root, "inside-link/new.json")).toBe(
+      join(root, "inside-link/new.json"),
+    );
+  });
+
+  it("rejects existing symlink components that redirect new or existing paths outside the root", async () => {
+    const root = await tempDir();
+    const outside = await tempDir();
+    await writeFile(join(outside, "existing.json"), "outside");
+    await symlink(outside, join(root, "escape"), "dir");
+
+    expect(() => resolveContainedPath(root, "escape/new.json")).toThrow(/stay inside/);
+    expect(() => resolveContainedPath(root, "escape/existing.json")).toThrow(/stay inside/);
+    expect(await readdir(outside)).toEqual(["existing.json"]);
+  });
+
   it("accepts child paths including basenames that begin with two dots", () => {
     expect(pathInside("/tmp/root", "/tmp/root/a/b")).toBe(true);
     expect(pathInside("/tmp/root", "/tmp/root/..cache")).toBe(true);
