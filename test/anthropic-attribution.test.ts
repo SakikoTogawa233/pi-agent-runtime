@@ -211,6 +211,22 @@ describe("Anthropic request contracts", () => {
     expect((params.tools as Array<Record<string, unknown>>)[0]).not.toHaveProperty("description");
   });
 
+  it("requires a first user text for attribution instead of inventing an empty fingerprint input", () => {
+    expect(() =>
+      rewriteAnthropicRequestPayload({
+        payload: {
+          model: "claude-sonnet-4-5",
+          max_tokens: 64_000,
+          messages: [{ role: "assistant", content: [{ type: "text", text: "prefill" }] }],
+        },
+        ctx: context(),
+        account: { deviceId: "device", accountUuid: "account" },
+        headerRegistered: true,
+        cacheRetention: "none",
+      }),
+    ).toThrow(/first user text/i);
+  });
+
   it("rejects malformed system blocks instead of preserving them as a fallback path", () => {
     expect(() =>
       rewriteAnthropicRequestPayload({
