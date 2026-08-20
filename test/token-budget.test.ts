@@ -223,8 +223,11 @@ describe("token estimation", () => {
   });
 
   it("derives calibrated text capacity without a synthetic zero-byte admission failure", () => {
-    for (const family of ["anthropic", "openai-codex"] as const) {
-      const allowedInputTokens = 231_040;
+    for (const [family, expectedCapacity] of [
+      ["anthropic", 172_114],
+      ["openai-codex", 287_520],
+    ] as const) {
+      const allowedInputTokens = 100_000;
       const calibration = TOKEN_BUDGET_FAMILY_CALIBRATIONS[family];
       const bytes = maxKnownTextBytesForTokens({
         family,
@@ -233,6 +236,7 @@ describe("token estimation", () => {
         calibrationBacked: true,
         familyResolution: "model_override",
       });
+      expect(bytes).toBe(expectedCapacity);
       expect(bytes).toBe(
         Math.floor(
           ((allowedInputTokens - calibration.affine_f_tokens) *
@@ -260,6 +264,25 @@ describe("token estimation", () => {
       expect(estimate(bytes), family).toBe(allowedInputTokens);
       expect(estimate(bytes + 1), family).toBe(allowedInputTokens + 1);
     }
+
+    expect(() =>
+      maxKnownTextBytesForTokens({
+        family: "anthropic",
+        allowedInputTokens: 29_596,
+        profile: "calibrated",
+        calibrationBacked: true,
+        familyResolution: "model_override",
+      }),
+    ).toThrow(/capacity.*calibration domain/i);
+    expect(() =>
+      maxKnownTextBytesForTokens({
+        family: "openai-codex",
+        allowedInputTokens: 100_000,
+        profile: "calibrated",
+        calibrationBacked: false,
+        familyResolution: "model_override",
+      }),
+    ).toThrow(/calibration backing/i);
   });
 
   it("resolves only the frozen backed model set and fails malformed arithmetic loudly", () => {
