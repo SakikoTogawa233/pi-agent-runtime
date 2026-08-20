@@ -20,6 +20,7 @@ const badLines = [
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 const anthropicModel: PiModelLike = {
@@ -123,10 +124,18 @@ describe("Anthropic request contracts", () => {
     ).toThrow(/long cache retention/);
   });
 
-  it("rejects malformed direct cache retention instead of degrading it to short retention", () => {
-    expect(() =>
-      resolveCacheRetentionPreference({ cacheRetention: "invalid" as never, env: {} }),
-    ).toThrow(/cacheRetention/);
+  it("keeps cache policy sources explicit and validates every direct value", () => {
+    vi.stubEnv("PI_CACHE_RETENTION", "long");
+    expect(() => resolveCacheRetentionPreference({ env: {} })).toThrow(/policy is required/);
+    expect(resolveCacheRetentionPreference({ env: { PI_CACHE_RETENTION: "short" } })).toBe("short");
+    expect(resolveCacheRetentionPreference({ cacheRetention: "none", env: {} }, "long")).toBe(
+      "none",
+    );
+    for (const invalid of ["", "LONG", "invalid", null, 1]) {
+      expect(() =>
+        resolveCacheRetentionPreference({ cacheRetention: invalid as never, env: {} }),
+      ).toThrow(/cacheRetention/);
+    }
     expect(() =>
       buildAnthropicRequestParams(
         anthropicModel,
@@ -227,6 +236,50 @@ describe("Anthropic request contracts", () => {
     ).toThrow(/first user text/i);
   });
 
+  it("does not infer cache policy from incoming markers", () => {
+    const original = {
+      model: "claude-sonnet-4-5",
+      max_tokens: 64_000,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "hello", cache_control: { type: "ephemeral" } }],
+        },
+      ],
+    };
+    const rewritten = rewriteAnthropicRequestPayload({
+      payload: original,
+      ctx: context(),
+      account: { deviceId: "device", accountUuid: "account" },
+      headerRegistered: true,
+      cacheRetention: undefined,
+    });
+    const serialized = JSON.stringify(rewritten);
+    expect(serialized.match(/cache_control/g)).toHaveLength(1);
+    expect(original.messages[0]?.content[0]?.cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  it("rejects more than four cache breakpoints", () => {
+    expect(() =>
+      rewriteAnthropicRequestPayload({
+        payload: {
+          model: "claude-sonnet-4-5",
+          max_tokens: 64_000,
+          system: Array.from({ length: 5 }, (_unused, index) => ({
+            type: "text",
+            text: `system-${String(index)}`,
+            cache_control: { type: "ephemeral" },
+          })),
+          messages: [{ role: "user", content: "hello" }],
+        },
+        ctx: context(),
+        account: { deviceId: "device", accountUuid: "account" },
+        headerRegistered: true,
+        cacheRetention: undefined,
+      }),
+    ).toThrow(/at most 4/);
+  });
+
   it("rejects malformed system blocks instead of preserving them as a fallback path", () => {
     expect(() =>
       rewriteAnthropicRequestPayload({
@@ -325,6 +378,19 @@ describe("Anthropic beta messages transport", () => {
       [
         sseEvent("message_start", { type: "message_start", message: { id: "msg-1" } }),
         sseEvent("future_event", { type: "future_event" }),
+        sseEvent("message_delta", {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn" },
+        }),
+        sseEvent("message_stop", { type: "message_stop" }),
+      ].join(""),
+      [
+        sseEvent("message_start", { type: "message_start", message: { id: "msg-1" } }),
+        sseEvent("content_block_start", {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "" },
+        }),
         sseEvent("message_delta", {
           type: "message_delta",
           delta: { stop_reason: "end_turn" },
@@ -443,6 +509,36 @@ describe("Anthropic beta messages transport", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({ stopReason: "stop", content: [{ text: "retried" }] });
+  });
+
+  it("exhausts retryable failures and never retries a non-retryable response", async () => {
+    const retryable = vi
+      .fn()
+      .mockImplementation(
+        async () => new Response("busy", { status: 503, statusText: "Unavailable" }),
+      );
+    vi.stubGlobal("fetch", retryable);
+    const exhausted = await streamAnthropicViaBetaMessages(
+      anthropicModel,
+      { messages: [{ role: "user", content: "hello" }] },
+      streamOptions({ maxRetries: 2 }),
+    ).result();
+    expect(retryable).toHaveBeenCalledTimes(3);
+    expect(exhausted.stopReason).toBe("error");
+    expect(exhausted.errorMessage).toMatch(/HTTP 503/);
+
+    const nonRetryable = vi
+      .fn()
+      .mockResolvedValue(new Response("bad request", { status: 400, statusText: "Bad Request" }));
+    vi.stubGlobal("fetch", nonRetryable);
+    const rejected = await streamAnthropicViaBetaMessages(
+      anthropicModel,
+      { messages: [{ role: "user", content: "hello" }] },
+      streamOptions({ maxRetries: 2 }),
+    ).result();
+    expect(nonRetryable).toHaveBeenCalledTimes(1);
+    expect(rejected.stopReason).toBe("error");
+    expect(rejected.errorMessage).toMatch(/HTTP 400/);
   });
 
   it("enforces timeoutMs on the request instead of leaving it inert", async () => {

@@ -44,7 +44,9 @@ type RecordedCall =
 class RecordingOperations implements DurableFileOperations {
   readonly platform: NodeJS.Platform;
   readonly calls: RecordedCall[] = [];
+  openDirectoryError: Error | undefined;
   syncDirectoryError: Error | undefined;
+  closeDirectoryError: Error | undefined;
 
   constructor(platform: NodeJS.Platform = "linux") {
     this.platform = platform;
@@ -71,6 +73,7 @@ class RecordingOperations implements DurableFileOperations {
 
   async openDirectory(path: string): Promise<DurableDirectoryHandle> {
     this.calls.push({ kind: "openDirectory", path });
+    if (this.openDirectoryError !== undefined) throw this.openDirectoryError;
     return {
       sync: async () => {
         this.calls.push({ kind: "syncDirectory", path });
@@ -78,6 +81,7 @@ class RecordingOperations implements DurableFileOperations {
       },
       close: async () => {
         this.calls.push({ kind: "closeDirectory", path });
+        if (this.closeDirectoryError !== undefined) throw this.closeDirectoryError;
       },
     };
   }
@@ -162,6 +166,36 @@ describe("durable file writer sequencing", () => {
       "syncDirectory",
       "closeDirectory",
     ]);
+  });
+
+  it("reports every direct-create directory durability failure", async () => {
+    for (const operation of ["open_directory", "sync_directory", "close_directory"] as const) {
+      const operations = new RecordingOperations();
+      const failure = new Error(`${operation} failed`);
+      if (operation === "open_directory") operations.openDirectoryError = failure;
+      else if (operation === "sync_directory") operations.syncDirectoryError = failure;
+      else operations.closeDirectoryError = failure;
+      const writer = createDurableFileWriter(operations);
+
+      await expect(writer.writePrivate("/virtual/created.txt", "data")).rejects.toMatchObject({
+        operation,
+        path: "/virtual",
+        primaryCause: failure,
+        renameCompleted: false,
+      } satisfies Partial<DurableFileError>);
+    }
+  });
+
+  it("marks replacement directory failures as post-rename", async () => {
+    const operations = new RecordingOperations();
+    operations.openDirectoryError = new Error("directory open failed");
+    const writer = createDurableFileWriter(operations);
+
+    await expect(writer.replace("/virtual/target.txt", "data")).rejects.toMatchObject({
+      operation: "open_directory",
+      path: "/virtual",
+      renameCompleted: true,
+    } satisfies Partial<DurableFileError>);
   });
 
   it("keeps the Windows direct-write sequence handle-scoped", async () => {
