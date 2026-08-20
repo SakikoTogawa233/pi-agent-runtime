@@ -1266,6 +1266,9 @@ export function buildAnthropicRequestParams(
   if (tools.length > 0) params["tools"] = tools;
   else params["tools"] = [];
   const reasoning = options?.reasoning;
+  if (reasoning !== undefined && options?.temperature !== undefined) {
+    throw new Error("Anthropic attribution temperature is incompatible with thinking");
+  }
   if (model.reasoning && reasoning !== undefined) {
     if (policy.thinkingPolicy === "adaptive-effort") {
       params["thinking"] = { type: "adaptive" };
