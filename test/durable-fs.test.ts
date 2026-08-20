@@ -262,12 +262,13 @@ describe("path containment", () => {
     expect(await readdir(outside)).toEqual(["existing.json"]);
   });
 
-  it("accepts child paths including basenames that begin with two dots", () => {
-    expect(pathInside("/tmp/root", "/tmp/root/a/b")).toBe(true);
-    expect(pathInside("/tmp/root", "/tmp/root/..cache")).toBe(true);
-    expect(resolveContainedPath("/tmp/root", "..cache/item")).toBe("/tmp/root/..cache/item");
-    expect(resolveContainedPath("/tmp/root", "a/b")).toBe("/tmp/root/a/b");
-    expect(() => assertPathContained("/tmp/root", "/tmp/root/a/b")).not.toThrow();
+  it("accepts child paths including basenames that begin with two dots", async () => {
+    const root = await tempDir();
+    expect(pathInside(root, join(root, "a/b"))).toBe(true);
+    expect(pathInside(root, join(root, "..cache"))).toBe(true);
+    expect(resolveContainedPath(root, "..cache/item")).toBe(join(root, "..cache/item"));
+    expect(resolveContainedPath(root, "a/b")).toBe(join(root, "a/b"));
+    expect(() => assertPathContained(root, join(root, "a/b"))).not.toThrow();
   });
 
   it("rejects traversal, absolute escape, and the parent itself", () => {

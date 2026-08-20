@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { lstatSync, realpathSync } from "node:fs";
 import { open as nodeOpen, rename as nodeRename, rm as nodeRm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -452,10 +453,30 @@ export function assertPathContained(parent: string, child: string): void {
   }
 }
 
+function nearestExistingAncestor(path: string): string {
+  let candidate = path;
+  for (;;) {
+    try {
+      lstatSync(candidate);
+      return candidate;
+    } catch (error) {
+      if (nativeCodeForCause(error) !== "ENOENT") throw error;
+      const parent = dirname(candidate);
+      if (parent === candidate) throw error;
+      candidate = parent;
+    }
+  }
+}
+
 export function resolveContainedPath(parent: string, childPath: string): string {
   if (isAbsolute(childPath)) throw new Error("Contained path must be relative");
-  const child = resolve(parent, childPath);
-  assertPathContained(parent, child);
-  if (child === resolve(parent)) throw new Error("Contained path must identify a child path");
+  const parentPath = resolve(parent);
+  const child = resolve(parentPath, childPath);
+  assertPathContained(parentPath, child);
+  if (child === parentPath) throw new Error("Contained path must identify a child path");
+
+  const parentRealPath = realpathSync(parentPath);
+  const existingAncestorRealPath = realpathSync(nearestExistingAncestor(child));
+  assertPathContained(parentRealPath, existingAncestorRealPath);
   return child;
 }
