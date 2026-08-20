@@ -434,9 +434,7 @@ export async function replacePrivateFileDurable(path: string, data: DurableData)
 
 export function pathInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
-  return (
-    rel === "" || (!rel.startsWith("..") && !isAbsolute(rel) && !rel.split(sep).includes(".."))
-  );
+  return rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`));
 }
 
 export function assertPathContained(parent: string, child: string): void {

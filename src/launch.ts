@@ -5,7 +5,6 @@ import {
 } from "node:child_process";
 import type { Stats } from "node:fs";
 import { readFileSync, realpathSync, statSync } from "node:fs";
-import { createRequire } from "node:module";
 import { dirname, extname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -58,38 +57,30 @@ interface JsonRecord {
   readonly [key: string]: unknown;
 }
 
+function nativeErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const code = Reflect.get(error, "code");
+  return typeof code === "string" ? code : undefined;
+}
+
 function defaultResolvePackageJson(specifier: string): string {
-  const requireForPi = createRequire(import.meta.url);
-  try {
-    return requireForPi.resolve(specifier);
-  } catch (manifestError) {
-    if (specifier !== PI_PACKAGE_MANIFEST) throw manifestError;
-    let packageEntry: string;
+  if (specifier !== PI_PACKAGE_MANIFEST) {
+    throw new Error(`unsupported package manifest specifier: ${specifier}`);
+  }
+  const packageEntry = fileURLToPath(import.meta.resolve(PI_PACKAGE_NAME));
+  let dir = dirname(packageEntry);
+  for (;;) {
+    const candidate = join(dir, "package.json");
     try {
-      packageEntry = fileURLToPath(import.meta.resolve(PI_PACKAGE_NAME));
-    } catch (entryError) {
-      throw new Error(
-        `${errorMessage(manifestError)}; package entry resolve failed: ${errorMessage(entryError)}`,
-      );
+      if (statSync(candidate).isFile()) return candidate;
+      throw new Error(`${candidate} is not a regular file`);
+    } catch (error) {
+      const code = nativeErrorCode(error);
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
     }
-    const diagnostics: string[] = [];
-    let dir = dirname(packageEntry);
-    for (;;) {
-      const candidate = join(dir, "package.json");
-      try {
-        if (statSync(candidate).isFile()) return candidate;
-        diagnostics.push(`${candidate} is not a regular file`);
-      } catch (statError) {
-        diagnostics.push(`${candidate}: ${errorMessage(statError)}`);
-      }
-      const parent = dirname(dir);
-      if (parent === dir) {
-        throw new Error(
-          `${errorMessage(manifestError)}; package entry search failed: ${diagnostics.join("; ")}`,
-        );
-      }
-      dir = parent;
-    }
+    const parent = dirname(dir);
+    if (parent === dir) throw new Error(`package manifest not found above ${packageEntry}`);
+    dir = parent;
   }
 }
 
@@ -136,9 +127,7 @@ function readPiBin(manifest: JsonRecord, manifestPath: string): string {
 
 function pathInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
-  return (
-    rel === "" || (!rel.startsWith("..") && !isAbsolute(rel) && !rel.split(sep).includes(".."))
-  );
+  return rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`));
 }
 
 export function resolvePiLaunch(deps: PiLaunchDependencies = {}): PiLaunchSpec {

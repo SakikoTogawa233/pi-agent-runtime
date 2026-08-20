@@ -1,3 +1,5 @@
+import { assertJsonValue } from "./json-value.js";
+
 const LF = 0x0a;
 const CR = 0x0d;
 
@@ -22,7 +24,8 @@ function parseJsonRecord(line: string): unknown {
 }
 
 export function encodeJsonLine(value: unknown): Buffer {
-  return Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
+  assertJsonValue(value);
+  return Buffer.from(`${JSON.stringify(value) as string}\n`, "utf8");
 }
 
 export class JsonLineDecoder<T> {

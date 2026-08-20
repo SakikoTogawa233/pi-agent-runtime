@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { assertJsonValue, sortJsonValue } from "./json-value.js";
 
 export type JsonObject = Readonly<Record<PropertyKey, unknown>>;
 
@@ -12,17 +13,8 @@ export function parseJsonText(text: string): unknown {
 }
 
 export function canonicalJson(value: unknown): string {
-  return JSON.stringify(sortJson(value));
-}
-
-function sortJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortJson);
-  if (!isJsonObject(value)) return value;
-  return Object.fromEntries(
-    Object.keys(value)
-      .sort()
-      .map((key) => [key, sortJson(value[key])]),
-  );
+  assertJsonValue(value);
+  return JSON.stringify(sortJsonValue(value)) as string;
 }
 
 export function sha256Buffer(buffer: Buffer): string {
