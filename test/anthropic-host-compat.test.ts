@@ -8,7 +8,7 @@ import type {
   StreamFunction,
   Tool,
 } from "@earendil-works/pi-ai";
-import { Type } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, Type } from "@earendil-works/pi-ai";
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
 import { describe, expect, it } from "vitest";
 import {
@@ -94,6 +94,29 @@ describe("Pi 0.84.2 Anthropic host compatibility", () => {
         input_schema: { type: "object", properties: {} },
       },
     ]);
+  });
+
+  it("maps every installed adaptive thinking level through the host model map", () => {
+    for (const model of Object.values(ANTHROPIC_MODELS)) {
+      if (model.compat?.forceAdaptiveThinking !== true) continue;
+      for (const level of getSupportedThinkingLevels(model)) {
+        if (level === "off") continue;
+        const params = buildAnthropicRequestParams(model, catalogContext, {
+          cacheRetention: "none",
+          reasoning: level,
+        });
+        const mapped = model.thinkingLevelMap?.[level];
+        const expected =
+          typeof mapped === "string"
+            ? mapped
+            : level === "minimal" || level === "low"
+              ? "low"
+              : level === "medium"
+                ? "medium"
+                : "high";
+        expect(params.output_config).toEqual({ effort: expected });
+      }
+    }
   });
 
   it("maps the installed max thinking level for adaptive and fixed-budget models", () => {
