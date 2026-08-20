@@ -114,6 +114,13 @@ describe("Pi 0.84.2 Anthropic host compatibility", () => {
         temperature: 0.5,
       }).temperature,
     ).toBe(0.5);
+    expect(() =>
+      buildAnthropicRequestParams(ANTHROPIC_MODELS["claude-sonnet-4-5"], catalogContext, {
+        cacheRetention: "none",
+        reasoning: "high",
+        temperature: 0.5,
+      }),
+    ).toThrow(/temperature.*thinking/i);
   });
 
   it("maps every installed adaptive thinking level through the host model map", () => {
