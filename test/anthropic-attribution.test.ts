@@ -507,6 +507,24 @@ describe("Anthropic beta messages transport", () => {
     expect(result.errorMessage).toMatch(/capacity exhausted/);
   });
 
+  it("preserves the installed Anthropic refusal explanation", async () => {
+    const result = await streamedResult(
+      [
+        sseEvent("message_start", { type: "message_start", message: { id: "msg-1" } }),
+        sseEvent("message_delta", {
+          type: "message_delta",
+          delta: {
+            stop_reason: "refusal",
+            stop_details: { type: "refusal", explanation: "request refused by policy" },
+          },
+        }),
+        sseEvent("message_stop", { type: "message_stop" }),
+      ].join(""),
+    );
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toBe("request refused by policy");
+  });
+
   it("rejects unknown and out-of-order SSE event sequences", async () => {
     const malformedBodies = [
       [

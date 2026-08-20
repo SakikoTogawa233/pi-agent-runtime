@@ -10,6 +10,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels, Type } from "@earendil-works/pi-ai";
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
+import type { ProviderConfig } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import {
   type AssistantMessageEventStreamLike,
@@ -20,7 +21,7 @@ import {
   type PiSimpleStreamOptions,
   type PiStreamContext,
   type PiToolLike,
-  type streamAnthropicViaBetaMessages,
+  streamAnthropicViaBetaMessages,
 } from "../src/anthropic-attribution.js";
 
 type Equal<Left, Right> = (<Type>() => Type extends Left ? 1 : 2) extends <
@@ -41,12 +42,15 @@ type _StreamMatchesHost = Expect<
   Equal<AssistantMessageEventStreamLike, AssistantMessageEventStream>
 >;
 type _CacheRetentionMatchesHost = Expect<Equal<CacheRetention, HostCacheRetention>>;
-type _TransportMatchesHost = Expect<
+type _AnthropicTransportMatchesHostApi = Expect<
   Equal<
     typeof streamAnthropicViaBetaMessages,
     StreamFunction<"anthropic-messages", SimpleStreamOptions>
   >
 >;
+const hostProviderTransport: NonNullable<ProviderConfig["streamSimple"]> =
+  streamAnthropicViaBetaMessages;
+void hostProviderTransport;
 
 const catalogContext: Context = {
   messages: [{ role: "user", content: "hello", timestamp: 1 }],
@@ -94,6 +98,30 @@ describe("Pi 0.84.2 Anthropic host compatibility", () => {
         input_schema: { type: "object", properties: {} },
       },
     ]);
+  });
+
+  it("honors installed off and temperature capability semantics", () => {
+    const fable = buildAnthropicRequestParams(
+      ANTHROPIC_MODELS["claude-fable-5"],
+      catalogContext,
+      { cacheRetention: "none" },
+    );
+    expect(fable).not.toHaveProperty("thinking");
+
+    expect(() =>
+      buildAnthropicRequestParams(
+        ANTHROPIC_MODELS["claude-opus-4-7"],
+        catalogContext,
+        { cacheRetention: "none", temperature: 0.5 },
+      ),
+    ).toThrow(/temperature.*not support/i);
+    expect(
+      buildAnthropicRequestParams(
+        ANTHROPIC_MODELS["claude-sonnet-4-5"],
+        catalogContext,
+        { cacheRetention: "none", temperature: 0.5 },
+      ).temperature,
+    ).toBe(0.5);
   });
 
   it("maps every installed adaptive thinking level through the host model map", () => {
