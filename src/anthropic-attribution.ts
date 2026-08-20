@@ -7,6 +7,7 @@ import type {
   AssistantMessage,
   AssistantMessageEventStream,
   Context,
+  FetchFunction,
   CacheRetention as HostCacheRetention,
   Model,
   SimpleStreamOptions,
@@ -1251,32 +1252,71 @@ function headersToRecord(headers: Headers): Record<string, string> {
   return Object.fromEntries([...headers.entries()]);
 }
 
-function lowerHeaderMap(
+interface ResolvedHeader {
+  readonly name: string;
+  readonly value: string;
+}
+
+function applyHeaders(
+  target: Map<string, ResolvedHeader>,
   headers: Record<string, string | null> | undefined,
-): Record<string, string | null> {
-  const output: Record<string, string | null> = {};
-  for (const [key, value] of Object.entries(headers ?? {})) output[key.toLowerCase()] = value;
-  return output;
+): void {
+  if (headers === undefined) return;
+  for (const [name, value] of Object.entries(headers)) {
+    const key = name.toLowerCase();
+    if (value === null) target.delete(key);
+    else target.set(key, { name, value });
+  }
+}
+
+function requireResolvedHeader(
+  headers: Map<string, ResolvedHeader>,
+  name: string,
+  expectedValue: string,
+): void {
+  const resolved = headers.get(name.toLowerCase());
+  if (resolved === undefined) {
+    throw new Error(`Anthropic attribution ${name} header is required`);
+  }
+  if (resolved.value !== expectedValue) {
+    throw new Error(
+      `Anthropic attribution ${name} header must match the resolved attribution value`,
+    );
+  }
 }
 
 function buildFetchHeaders(
+  model: PiModelLike,
   options: PiSimpleStreamOptions | undefined,
   apiKey: string,
   sessionHeader: string,
   beta: string,
 ): Record<string, string> {
-  const optionHeaders = lowerHeaderMap(options?.headers);
-  return {
+  const authorization = `Bearer ${apiKey}`;
+  const headers = new Map<string, ResolvedHeader>();
+  applyHeaders(headers, {
     Accept: "application/json",
-    Authorization: `Bearer ${apiKey}`,
+    Authorization: authorization,
     "Content-Type": "application/json",
-    "User-Agent": optionHeaders["user-agent"] ?? CLAUDE_CODE_USER_AGENT,
+    "User-Agent": CLAUDE_CODE_USER_AGENT,
     [CLAUDE_CODE_SESSION_HEADER]: sessionHeader,
     "anthropic-beta": beta,
     "anthropic-dangerous-direct-browser-access": "true",
     "anthropic-version": "2023-06-01",
     "x-app": "cli",
-  };
+  });
+  applyHeaders(headers, model.headers);
+  applyHeaders(headers, options?.headers);
+
+  requireResolvedHeader(headers, "Authorization", authorization);
+  requireResolvedHeader(headers, "Content-Type", "application/json");
+  requireResolvedHeader(headers, CLAUDE_CODE_SESSION_HEADER, sessionHeader);
+  requireResolvedHeader(headers, "anthropic-beta", beta);
+  requireResolvedHeader(headers, "anthropic-dangerous-direct-browser-access", "true");
+  requireResolvedHeader(headers, "anthropic-version", "2023-06-01");
+  requireResolvedHeader(headers, "x-app", "cli");
+
+  return Object.fromEntries([...headers.values()].map(({ name, value }) => [name, value]));
 }
 
 function mapStopReason(reason: unknown): AssistantMessageLike["stopReason"] {
@@ -1601,6 +1641,7 @@ function retryableHttpStatus(status: number): boolean {
 }
 
 async function fetchAnthropicResponse(input: {
+  readonly fetch: FetchFunction;
   readonly url: string;
   readonly requestInit: RequestInit;
   readonly parentSignal: AbortSignal | undefined;
@@ -1611,7 +1652,7 @@ async function fetchAnthropicResponse(input: {
   for (;;) {
     const abortScope = createRequestAbortScope(input.parentSignal, input.timeoutMs);
     try {
-      const response = await fetch(input.url, {
+      const response = await input.fetch(input.url, {
         ...input.requestInit,
         ...(abortScope.signal === undefined ? {} : { signal: abortScope.signal }),
       });
@@ -1991,18 +2032,22 @@ export function streamAnthropicViaBetaMessages(
         );
 
       const configuredTransport = transportOptions(options);
-      const baseUrl =
-        model.baseUrl && model.baseUrl.length > 0
-          ? model.baseUrl.replace(/\/$/, "")
-          : "https://api.anthropic.com";
+      if (typeof model.baseUrl !== "string" || model.baseUrl.trim().length === 0) {
+        throw new Error("Anthropic attribution model.baseUrl resolved endpoint is required");
+      }
+      const baseUrl = model.baseUrl.replace(/\/+$/, "");
+      if (baseUrl.length === 0) {
+        throw new Error("Anthropic attribution model.baseUrl resolved endpoint is required");
+      }
       const url = `${baseUrl}/v1/messages?beta=true`;
-      const headers = buildFetchHeaders(options, apiKey, sessionId, policy.beta);
+      const headers = buildFetchHeaders(model, options, apiKey, sessionId, policy.beta);
       const requestInit: RequestInit = {
         method: "POST",
         headers,
         body: JSON.stringify(params),
       };
       const fetched = await fetchAnthropicResponse({
+        fetch: options?.fetch ?? globalThis.fetch,
         url,
         requestInit,
         parentSignal: options?.signal,

@@ -759,9 +759,7 @@ describe("Anthropic beta messages transport", () => {
     vi.stubGlobal("fetch", globalFetch);
     const customFetch = vi.fn(
       async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-        expect(String(input)).toBe(
-          "https://gateway.example.test/anthropic/v1/messages?beta=true",
-        );
+        expect(String(input)).toBe("https://gateway.example.test/anthropic/v1/messages?beta=true");
         const headers = new Headers(init?.headers);
         expect(Object.fromEntries(headers.entries())).toMatchObject({
           accept: "application/vnd.pi+json",
