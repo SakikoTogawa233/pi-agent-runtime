@@ -47,6 +47,10 @@ const zeroUsage = {
 };
 const sessionManager = SessionManager.inMemory();
 const TEST_SESSION_ID = sessionManager.getSessionId();
+const TEST_ACCOUNT = {
+  deviceId: "d".repeat(64),
+  accountUuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+} as const;
 
 function userContext(content = "hello"): PiStreamContext {
   return { messages: [{ role: "user", content, timestamp: 1 }] };
@@ -139,13 +143,17 @@ describe("Anthropic request contracts", () => {
     ).toThrow(/long cache retention/);
   });
 
-  it("keeps cache policy sources explicit and validates every direct value", () => {
+  it("overlays scoped provider env on process env and validates explicit malformed values", () => {
     vi.stubEnv("PI_CACHE_RETENTION", "long");
-    expect(() => resolveCacheRetentionPreference({ env: {} })).toThrow(/policy is required/);
+    expect(resolveCacheRetentionPreference({ env: {} })).toBe("long");
     expect(resolveCacheRetentionPreference({ env: { PI_CACHE_RETENTION: "short" } })).toBe("short");
     expect(resolveCacheRetentionPreference({ cacheRetention: "none", env: {} }, "long")).toBe(
       "none",
     );
+    vi.stubEnv("PI_CACHE_RETENTION", "short");
+    expect(() =>
+      resolveCacheRetentionPreference({ env: { PI_CACHE_RETENTION: "LONG" } }),
+    ).toThrow(/PI_CACHE_RETENTION/);
     for (const invalid of ["", "LONG", "invalid", null, 1]) {
       expect(() =>
         resolveCacheRetentionPreference({ cacheRetention: invalid as never, env: {} }),
@@ -274,7 +282,28 @@ describe("Anthropic request contracts", () => {
     ).toThrow(/isError.*boolean/);
   });
 
-  it("rejects unknown message roles and incomplete thinking blocks", () => {
+  it("accepts host-valid unsigned interrupted thinking without inventing a signature", () => {
+    const params = buildAnthropicRequestParams(
+      anthropicModel,
+      {
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "thinking", thinking: "interrupted reasoning" }],
+          },
+        ] as never,
+      },
+      { cacheRetention: "none" },
+    );
+    expect(params.messages).toEqual([
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "interrupted reasoning" }],
+      },
+    ]);
+  });
+
+  it("rejects unknown message roles and malformed thinking blocks", () => {
     expect(() =>
       buildAnthropicRequestParams(
         anthropicModel,
@@ -282,20 +311,18 @@ describe("Anthropic request contracts", () => {
         { cacheRetention: "none" },
       ),
     ).toThrow(/message role/i);
-    expect(() =>
-      buildAnthropicRequestParams(
-        anthropicModel,
-        {
-          messages: [
-            {
-              role: "assistant",
-              content: [{ type: "thinking", thinking: "reasoning without signature" }],
-            },
-          ] as never,
-        },
-        { cacheRetention: "none" },
-      ),
-    ).toThrow(/thinkingSignature/);
+    for (const content of [
+      [{ type: "thinking", thinking: 42 }],
+      [{ type: "thinking", thinking: "redacted", redacted: true }],
+    ]) {
+      expect(() =>
+        buildAnthropicRequestParams(
+          anthropicModel,
+          { messages: [{ role: "assistant", content }] as never },
+          { cacheRetention: "none" },
+        ),
+      ).toThrow(/thinking|thinkingSignature/);
+    }
   });
 
   it("rejects a conversation that converts to no Anthropic messages", () => {
@@ -324,6 +351,65 @@ describe("Anthropic request contracts", () => {
       "description",
       "Read a file",
     );
+  });
+
+  it("matches Anthropic strict-tool capability and constrained sampling semantics", () => {
+    const strictTool = {
+      name: "strict_read",
+      description: "Read exactly",
+      parameters: Type.Object({ path: Type.String(), note: Type.Optional(Type.String()) }),
+      constrainedSampling: { type: "json_schema", strict: "require" },
+    } as const;
+    const supported = buildAnthropicRequestParams(
+      { ...anthropicModel, compat: { ...anthropicModel.compat, supportsStrictTools: true } },
+      { ...userContext(), tools: [strictTool] },
+      { cacheRetention: "none" },
+    );
+    expect((supported.tools as Array<Record<string, unknown>>)[0]).toMatchObject({
+      strict: true,
+      input_schema: {
+        type: "object",
+        required: ["path", "note"],
+        additionalProperties: false,
+      },
+    });
+
+    expect(() =>
+      buildAnthropicRequestParams(
+        { ...anthropicModel, compat: { ...anthropicModel.compat, supportsStrictTools: false } },
+        { ...userContext(), tools: [strictTool] },
+        { cacheRetention: "none" },
+      ),
+    ).toThrow(/requires JSON-schema constrained sampling.*unsupported/i);
+
+    const preferred = buildAnthropicRequestParams(
+      { ...anthropicModel, compat: { ...anthropicModel.compat, supportsStrictTools: false } },
+      {
+        ...userContext(),
+        tools: [{ ...strictTool, constrainedSampling: { type: "json_schema", strict: "prefer" } }],
+      },
+      { cacheRetention: "none" },
+    );
+    expect((preferred.tools as Array<Record<string, unknown>>)[0]).not.toHaveProperty("strict");
+
+    expect(() =>
+      buildAnthropicRequestParams(
+        anthropicModel,
+        {
+          ...userContext(),
+          tools: [
+            {
+              ...strictTool,
+              constrainedSampling: {
+                type: "grammar",
+                variants: { openai_lark: "start: /.+/" },
+              },
+            },
+          ],
+        },
+        { cacheRetention: "none" },
+      ),
+    ).toThrow(/grammar constrained sampling.*Anthropic/i);
   });
 
   it("requires a first user text for attribution instead of inventing an empty fingerprint input", () => {
@@ -465,16 +551,22 @@ function successfulSse(text = "hello"): string {
   ].join("");
 }
 
+function attributedPayload(payload: unknown): Record<string, unknown> {
+  return rewriteAnthropicRequestPayload({
+    payload,
+    ctx: context(),
+    account: TEST_ACCOUNT,
+    headerRegistered: true,
+    cacheRetention: undefined,
+  }) as Record<string, unknown>;
+}
+
 function streamOptions(overrides: Partial<PiSimpleStreamOptions> = {}): PiSimpleStreamOptions {
   return {
     apiKey: "sk-ant-oat-test-token",
     cacheRetention: "none",
-    onPayload: (payload) => ({
-      ...(payload as Record<string, unknown>),
-      metadata: {
-        user_id: JSON.stringify({ session_id: TEST_SESSION_ID }),
-      },
-    }),
+    sessionId: TEST_SESSION_ID,
+    onPayload: attributedPayload,
     ...overrides,
   };
 }
@@ -740,6 +832,46 @@ describe("Anthropic beta messages transport", () => {
     expect(result).toMatchObject({ stopReason: "stop", content: [{ text: "retried" }] });
   });
 
+  it("obeys x-should-retry before status policy and cancels retried response bodies", async () => {
+    const retryResponse = new Response("retry by directive", {
+      status: 400,
+      statusText: "Bad Request",
+      headers: { "x-should-retry": "true", "retry-after-ms": "0" },
+    });
+    const cancel = vi.spyOn(retryResponse.body as ReadableStream<Uint8Array>, "cancel");
+    const retryDirectiveFetch = vi
+      .fn()
+      .mockResolvedValueOnce(retryResponse)
+      .mockResolvedValueOnce(new Response(successfulSse("directive retry"), { status: 200 }));
+    const retried = await streamAnthropicViaBetaMessages(
+      anthropicModel,
+      userContext(),
+      streamOptions({ fetch: retryDirectiveFetch, maxRetries: 1 }),
+    ).result();
+    expect(retryDirectiveFetch).toHaveBeenCalledTimes(2);
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(retried).toMatchObject({ stopReason: "stop", content: [{ text: "directive retry" }] });
+
+    const noRetryFetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response("do not retry", {
+          status: 503,
+          statusText: "Unavailable",
+          headers: { "x-should-retry": "false" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(successfulSse("wrong retry"), { status: 200 }));
+    const rejected = await streamAnthropicViaBetaMessages(
+      anthropicModel,
+      userContext(),
+      streamOptions({ fetch: noRetryFetch, maxRetries: 1 }),
+    ).result();
+    expect(noRetryFetch).toHaveBeenCalledTimes(1);
+    expect(rejected.stopReason).toBe("error");
+    expect(rejected.errorMessage).toMatch(/HTTP 503.*do not retry/);
+  });
+
   it("honors maxRetryDelayMs and keeps custom fetch across retries", async () => {
     const globalFetch = vi.fn(() => {
       throw new Error("global fetch must not be used");
@@ -958,7 +1090,7 @@ describe("Anthropic beta messages transport", () => {
             cache_control: { type: "ephemeral" },
           })),
         }),
-        error: /at most 4/,
+        error: /at most 4|system identity/,
       },
       {
         label: "unpaired surrogate",
@@ -970,6 +1102,67 @@ describe("Anthropic beta messages transport", () => {
         replace: (payload) => ({ ...payload, model: "claude-opus-5" }),
         error: /payload model.*claude-sonnet-4-5/,
       },
+      {
+        label: "changed account UUID",
+        replace: (payload) => ({
+          ...payload,
+          metadata: {
+            user_id: JSON.stringify({
+              account_uuid: "ffffffff-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+              device_id: TEST_ACCOUNT.deviceId,
+              session_id: TEST_SESSION_ID,
+            }),
+          },
+        }),
+        error: /account_uuid.*expected attribution/i,
+      },
+      {
+        label: "changed device ID",
+        replace: (payload) => ({
+          ...payload,
+          metadata: {
+            user_id: JSON.stringify({
+              account_uuid: TEST_ACCOUNT.accountUuid,
+              device_id: "other-device",
+              session_id: TEST_SESSION_ID,
+            }),
+          },
+        }),
+        error: /device_id.*expected attribution/i,
+      },
+      {
+        label: "changed session ID",
+        replace: (payload) => ({
+          ...payload,
+          metadata: {
+            user_id: JSON.stringify({
+              account_uuid: TEST_ACCOUNT.accountUuid,
+              device_id: TEST_ACCOUNT.deviceId,
+              session_id: "other-session",
+            }),
+          },
+        }),
+        error: /session_id.*expected attribution/i,
+      },
+      {
+        label: "changed billing identity",
+        replace: (payload) => ({
+          ...payload,
+          system: [
+            { type: "text", text: "x-anthropic-billing-header: replaced" },
+            ...((payload.system as Array<Record<string, unknown>>).slice(1) ?? []),
+          ],
+        }),
+        error: /billing identity/i,
+      },
+      {
+        label: "removed required system identity",
+        replace: (payload) => ({
+          ...payload,
+          system: (payload.system as Array<Record<string, unknown>>).slice(0, 1),
+        }),
+        error: /system identity/i,
+      },
     ];
 
     for (const testCase of cases) {
@@ -978,11 +1171,7 @@ describe("Anthropic beta messages transport", () => {
         userContext(),
         streamOptions({
           maxTokens: testCase.maxTokens,
-          onPayload: (payload) =>
-            testCase.replace({
-              ...(payload as Record<string, unknown>),
-              metadata: { user_id: JSON.stringify({ session_id: TEST_SESSION_ID }) },
-            }),
+          onPayload: (payload) => testCase.replace(attributedPayload(payload)),
         }),
       ).result();
       expect(result.stopReason, testCase.label).toBe("error");
@@ -999,10 +1188,7 @@ describe("Anthropic beta messages transport", () => {
       userContext(),
       streamOptions({
         onPayload: (payload) => ({
-          ...(payload as Record<string, unknown>),
-          metadata: {
-            user_id: JSON.stringify({ session_id: TEST_SESSION_ID }),
-          },
+          ...attributedPayload(payload),
           unsupported: undefined,
         }),
       }),
