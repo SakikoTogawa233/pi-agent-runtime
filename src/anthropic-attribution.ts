@@ -1673,17 +1673,22 @@ function assertNonNegativeInteger(value: unknown, label: string): number {
 
 function transportOptions(options: PiSimpleStreamOptions | undefined): {
   readonly maxRetries: number;
+  readonly maxRetryDelayMs: number | undefined;
   readonly timeoutMs: number | undefined;
 } {
   const maxRetries =
     options?.maxRetries === undefined
       ? 0
       : assertNonNegativeInteger(options.maxRetries, "maxRetries");
+  const maxRetryDelayMs =
+    options?.maxRetryDelayMs === undefined
+      ? undefined
+      : assertNonNegativeInteger(options.maxRetryDelayMs, "maxRetryDelayMs");
   const timeoutMs =
     options?.timeoutMs === undefined
       ? undefined
       : assertPositiveInteger(options.timeoutMs, "timeoutMs");
-  return { maxRetries, timeoutMs };
+  return { maxRetries, maxRetryDelayMs, timeoutMs };
 }
 
 function requestTimeoutError(timeoutMs: number): Error {
@@ -1722,6 +1727,55 @@ function retryableHttpStatus(status: number): boolean {
   return status === 408 || status === 409 || status === 429 || status >= 500;
 }
 
+const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
+
+function retryDelayMs(
+  headers: Headers | undefined,
+  retryIndex: number,
+  maxRetryDelayMs: number | undefined,
+  errorMessage: string,
+): number {
+  const retryAfterMs = headers?.get("retry-after-ms");
+  let delayMs: number;
+  if (retryAfterMs !== null && retryAfterMs !== undefined) {
+    const parsed = Number.parseFloat(retryAfterMs);
+    delayMs = Number.isNaN(parsed) ? 500 * 2 ** retryIndex : parsed;
+  } else {
+    const retryAfter = headers?.get("retry-after");
+    if (retryAfter !== null && retryAfter !== undefined) {
+      const seconds = Number.parseFloat(retryAfter);
+      delayMs = Number.isNaN(seconds) ? Date.parse(retryAfter) - Date.now() : seconds * 1000;
+    } else {
+      delayMs = 500 * 2 ** retryIndex;
+    }
+  }
+  const maximum = maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
+  if (maximum > 0 && delayMs > maximum) {
+    throw new Error(
+      `Server requested ${String(Math.ceil(delayMs / 1000))}s retry delay (max: ${String(Math.ceil(maximum / 1000))}s). ${errorMessage}`,
+    );
+  }
+  return Math.max(0, delayMs);
+}
+
+function abortableDelay(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("Request was aborted"));
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timeout);
+      reject(new Error("Request was aborted"));
+    };
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 async function fetchAnthropicResponse(input: {
   readonly fetch: FetchFunction;
   readonly url: string;
@@ -1729,30 +1783,43 @@ async function fetchAnthropicResponse(input: {
   readonly parentSignal: AbortSignal | undefined;
   readonly timeoutMs: number | undefined;
   readonly maxRetries: number;
+  readonly maxRetryDelayMs: number | undefined;
 }): Promise<{ readonly response: Response; readonly abortScope: RequestAbortScope }> {
   let attempt = 0;
   for (;;) {
     const abortScope = createRequestAbortScope(input.parentSignal, input.timeoutMs);
+    let response: Response;
     try {
-      const response = await input.fetch(input.url, {
+      response = await input.fetch(input.url, {
         ...input.requestInit,
         ...(abortScope.signal === undefined ? {} : { signal: abortScope.signal }),
       });
-      if (retryableHttpStatus(response.status) && attempt < input.maxRetries) {
-        await response.body?.cancel();
-        abortScope.close();
-        attempt += 1;
-        continue;
-      }
-      return { response, abortScope };
     } catch (error) {
       const timedOut = abortScope.timedOut();
       abortScope.close();
       if (timedOut && input.timeoutMs !== undefined) throw requestTimeoutError(input.timeoutMs);
       if (input.parentSignal?.aborted) throw new Error("Request was aborted");
       if (attempt === input.maxRetries) throw error;
+      const delay = retryDelayMs(
+        undefined,
+        attempt,
+        input.maxRetryDelayMs,
+        error instanceof Error ? error.message : String(error),
+      );
       attempt += 1;
+      await abortableDelay(delay, input.parentSignal);
+      continue;
     }
+    if (retryableHttpStatus(response.status) && attempt < input.maxRetries) {
+      const errorMessage = `Anthropic beta messages request failed: HTTP ${String(response.status)} ${response.statusText}`;
+      const delay = retryDelayMs(response.headers, attempt, input.maxRetryDelayMs, errorMessage);
+      await response.body?.cancel();
+      abortScope.close();
+      attempt += 1;
+      await abortableDelay(delay, input.parentSignal);
+      continue;
+    }
+    return { response, abortScope };
   }
 }
 
@@ -2140,6 +2207,7 @@ export function streamAnthropicViaBetaMessages(
         parentSignal: options?.signal,
         timeoutMs: configuredTransport.timeoutMs,
         maxRetries: configuredTransport.maxRetries,
+        maxRetryDelayMs: configuredTransport.maxRetryDelayMs,
       });
       const response = fetched.response;
       activeAbortScope = fetched.abortScope;
