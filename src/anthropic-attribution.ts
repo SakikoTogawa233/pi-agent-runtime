@@ -1580,39 +1580,63 @@ export function updateAnthropicUsage(
     output.usage.cost.cacheWrite;
 }
 
+interface ParsedSseEvent {
+  readonly name: string;
+  readonly payload: JsonObject;
+}
+
 async function* iterateSseEvents(
   response: Response,
   signal?: AbortSignal,
-): AsyncGenerator<JsonObject> {
+): AsyncGenerator<ParsedSseEvent> {
   if (!response.body) throw new Error("Anthropic beta messages response had no body");
   const reader = response.body.getReader();
-  const decoder = new TextDecoder();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   let buffer = "";
-  let eventName = "";
+  let eventName: string | undefined;
   let dataLines: string[] = [];
-  function flush(): JsonObject | undefined {
-    if (dataLines.length === 0) return undefined;
+  function flush(): ParsedSseEvent | undefined {
+    if (eventName === undefined && dataLines.length === 0) return undefined;
+    if (eventName === undefined) {
+      throw new Error("Anthropic beta messages SSE record is missing its event field");
+    }
+    if (dataLines.length === 0) {
+      throw new Error(`Anthropic beta messages SSE ${eventName} record is missing data`);
+    }
     const data = dataLines.join("\n");
-    eventName = "";
+    const name = eventName;
+    eventName = undefined;
     dataLines = [];
-    if (data === "[DONE]") return undefined;
-    return parseJsonObject(data, "Anthropic beta messages SSE event");
+    const payload = parseJsonObject(data, `Anthropic beta messages SSE ${name} event`);
+    if (payload["type"] !== name) {
+      throw new Error(
+        `Anthropic beta messages SSE event/type mismatch: event ${name}, payload ${String(payload["type"])}`,
+      );
+    }
+    return { name, payload };
   }
-  function consumeLine(line: string): JsonObject | undefined {
+  function consumeLine(line: string): ParsedSseEvent | undefined {
     if (line.length === 0) return flush();
     if (line.startsWith(":")) return undefined;
     const colon = line.indexOf(":");
     const field = colon === -1 ? line : line.slice(0, colon);
     let value = colon === -1 ? "" : line.slice(colon + 1);
     if (value.startsWith(" ")) value = value.slice(1);
-    if (field === "event") eventName = value;
-    if (field === "data") dataLines.push(value);
-    void eventName;
+    if (field === "event") {
+      if (eventName !== undefined) {
+        throw new Error("Anthropic beta messages SSE record has multiple event fields");
+      }
+      eventName = nonEmptyString(value, "SSE event field");
+    } else if (field === "data") {
+      dataLines.push(value);
+    } else {
+      throw new Error(`Anthropic beta messages SSE record has unsupported field ${field}`);
+    }
     return undefined;
   }
   try {
     for (;;) {
-      if (signal?.aborted) throw new Error("Request was aborted");
+      if (signal?.aborted) throw signal.reason;
       const { value, done } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
@@ -1622,16 +1646,13 @@ async function* iterateSseEvents(
         const line = buffer.slice(0, match.index);
         buffer = buffer.slice(match.index + match[0].length);
         const event = consumeLine(line);
-        if (event) yield event;
+        if (event !== undefined) yield event;
       }
     }
     buffer += decoder.decode();
-    if (buffer.length > 0) {
-      const event = consumeLine(buffer);
-      if (event) yield event;
+    if (buffer.length > 0 || eventName !== undefined || dataLines.length > 0) {
+      throw new Error("Anthropic beta messages SSE stream ended with an incomplete record");
     }
-    const trailing = flush();
-    if (trailing) yield trailing;
   } finally {
     reader.releaseLock();
   }
@@ -1657,6 +1678,394 @@ function createOutput(model: PiModelLike): AssistantMessageLike {
   };
 }
 
+interface RequestAbortScope {
+  readonly signal: AbortSignal | undefined;
+  readonly timedOut: () => boolean;
+  close(): void;
+}
+
+function assertNonNegativeInteger(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`Anthropic attribution ${label} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+function transportOptions(options: PiSimpleStreamOptions | undefined): {
+  readonly maxRetries: number;
+  readonly timeoutMs: number | undefined;
+} {
+  const maxRetries =
+    options?.maxRetries === undefined
+      ? 0
+      : assertNonNegativeInteger(options.maxRetries, "maxRetries");
+  const timeoutMs =
+    options?.timeoutMs === undefined
+      ? undefined
+      : assertPositiveInteger(options.timeoutMs, "timeoutMs");
+  return { maxRetries, timeoutMs };
+}
+
+function requestTimeoutError(timeoutMs: number): Error {
+  return new Error(`Anthropic beta messages request timed out after ${String(timeoutMs)} ms`);
+}
+
+function createRequestAbortScope(
+  parentSignal: AbortSignal | undefined,
+  timeoutMs: number | undefined,
+): RequestAbortScope {
+  if (timeoutMs === undefined) {
+    return { signal: parentSignal, timedOut: () => false, close: () => undefined };
+  }
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort(requestTimeoutError(timeoutMs));
+  }, timeoutMs);
+  const abortFromParent = (): void => {
+    controller.abort(parentSignal?.reason);
+  };
+  if (parentSignal?.aborted) abortFromParent();
+  else parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+  return {
+    signal: controller.signal,
+    timedOut: () => timedOut,
+    close: () => {
+      clearTimeout(timeout);
+      parentSignal?.removeEventListener("abort", abortFromParent);
+    },
+  };
+}
+
+function retryableHttpStatus(status: number): boolean {
+  return status === 408 || status === 409 || status === 429 || status >= 500;
+}
+
+async function fetchAnthropicResponse(input: {
+  readonly url: string;
+  readonly requestInit: RequestInit;
+  readonly parentSignal: AbortSignal | undefined;
+  readonly timeoutMs: number | undefined;
+  readonly maxRetries: number;
+}): Promise<{ readonly response: Response; readonly abortScope: RequestAbortScope }> {
+  let attempt = 0;
+  for (;;) {
+    const abortScope = createRequestAbortScope(input.parentSignal, input.timeoutMs);
+    try {
+      const response = await fetch(input.url, {
+        ...input.requestInit,
+        ...(abortScope.signal === undefined ? {} : { signal: abortScope.signal }),
+      });
+      if (retryableHttpStatus(response.status) && attempt < input.maxRetries) {
+        await response.body?.cancel();
+        abortScope.close();
+        attempt += 1;
+        continue;
+      }
+      return { response, abortScope };
+    } catch (error) {
+      const timedOut = abortScope.timedOut();
+      abortScope.close();
+      if (timedOut && input.timeoutMs !== undefined) throw requestTimeoutError(input.timeoutMs);
+      if (input.parentSignal?.aborted) throw new Error("Request was aborted");
+      if (attempt === input.maxRetries) throw error;
+      attempt += 1;
+    }
+  }
+}
+
+function sseIndex(payload: JsonObject, eventName: string): number {
+  const index = payload["index"];
+  if (typeof index !== "number" || !Number.isSafeInteger(index) || index < 0) {
+    throw new Error(`Anthropic beta messages SSE ${eventName} index must be non-negative`);
+  }
+  return index;
+}
+
+function sseUsage(payload: JsonObject, eventName: string): JsonObject | undefined {
+  const usage = payload["usage"];
+  if (usage === undefined) return undefined;
+  if (!isPlainObject(usage)) {
+    throw new Error(`Anthropic beta messages SSE ${eventName} usage must be an object`);
+  }
+  return usage;
+}
+
+async function processAnthropicSse(
+  response: Response,
+  signal: AbortSignal | undefined,
+  output: AssistantMessageLike,
+  stream: AssistantMessageEventStreamLike,
+  model: PiModelLike,
+): Promise<void> {
+  const blocks = output.content as Array<JsonObject & { index?: number; partialJson?: string }>;
+  const activeBlocks = new Map<number, number>();
+  const seenBlockIndices = new Set<number>();
+  let sawMessageStart = false;
+  let sawMessageDelta = false;
+  let sawMessageStop = false;
+
+  for await (const parsed of iterateSseEvents(response, signal)) {
+    const event = parsed.payload;
+    if (sawMessageStop) {
+      throw new Error(`Anthropic beta messages SSE sequence continued after message_stop`);
+    }
+    if (parsed.name === "ping") continue;
+    if (parsed.name === "error") {
+      const providerError = event["error"];
+      if (!isPlainObject(providerError)) {
+        throw new Error("Anthropic beta messages SSE error event has malformed error payload");
+      }
+      throw new Error(
+        `Anthropic beta messages SSE error: ${nonEmptyString(providerError["message"], "SSE error.message")}`,
+      );
+    }
+    if (parsed.name === "message_start") {
+      if (sawMessageStart) {
+        throw new Error("Anthropic beta messages SSE sequence contains multiple message_start events");
+      }
+      const message = event["message"];
+      if (!isPlainObject(message)) {
+        throw new Error("Anthropic beta messages SSE message_start.message must be an object");
+      }
+      output.responseId = nonEmptyString(message["id"], "SSE message_start response id");
+      updateAnthropicUsage(output, sseUsage(message, "message_start.message"), model);
+      sawMessageStart = true;
+      continue;
+    }
+    if (!sawMessageStart) {
+      throw new Error(
+        `Anthropic beta messages SSE sequence received ${parsed.name} before message_start`,
+      );
+    }
+    if (parsed.name === "content_block_start") {
+      if (sawMessageDelta) {
+        throw new Error("Anthropic beta messages SSE content block started after message_delta");
+      }
+      const index = sseIndex(event, parsed.name);
+      if (seenBlockIndices.has(index)) {
+        throw new Error(`Anthropic beta messages SSE content block index ${String(index)} was reused`);
+      }
+      const contentBlock = event["content_block"];
+      if (!isPlainObject(contentBlock)) {
+        throw new Error("Anthropic beta messages SSE content_block_start.content_block is malformed");
+      }
+      if (contentBlock["type"] === "text") {
+        const text = contentBlock["text"];
+        if (typeof text !== "string") {
+          throw new Error("Anthropic beta messages SSE text content block requires text");
+        }
+        output.content.push({ type: "text", text, index });
+        stream.push({
+          type: "text_start",
+          contentIndex: output.content.length - 1,
+          partial: output,
+        });
+      } else if (contentBlock["type"] === "thinking") {
+        const thinking = contentBlock["thinking"];
+        const signature = contentBlock["signature"];
+        if (typeof thinking !== "string" || typeof signature !== "string") {
+          throw new Error(
+            "Anthropic beta messages SSE thinking content block requires thinking and signature",
+          );
+        }
+        output.content.push({
+          type: "thinking",
+          thinking,
+          thinkingSignature: signature,
+          index,
+        });
+        stream.push({
+          type: "thinking_start",
+          contentIndex: output.content.length - 1,
+          partial: output,
+        });
+      } else if (contentBlock["type"] === "redacted_thinking") {
+        output.content.push({
+          type: "thinking",
+          thinking: "[Reasoning redacted]",
+          thinkingSignature: nonEmptyString(
+            contentBlock["data"],
+            "SSE redacted_thinking content block data",
+          ),
+          redacted: true,
+          index,
+        });
+        stream.push({
+          type: "thinking_start",
+          contentIndex: output.content.length - 1,
+          partial: output,
+        });
+      } else if (contentBlock["type"] === "tool_use") {
+        if (!isPlainObject(contentBlock["input"])) {
+          throw new Error("Anthropic beta messages SSE tool_use input must be an object");
+        }
+        output.content.push({
+          type: "toolCall",
+          id: nonEmptyString(contentBlock["id"], "SSE tool_use id"),
+          name: nonEmptyString(contentBlock["name"], "SSE tool_use name"),
+          arguments: contentBlock["input"],
+          partialJson: "",
+          index,
+        });
+        stream.push({
+          type: "toolcall_start",
+          contentIndex: output.content.length - 1,
+          partial: output,
+        });
+      } else {
+        throw new Error(
+          `Anthropic beta messages SSE content block type ${String(contentBlock["type"])} is unsupported`,
+        );
+      }
+      seenBlockIndices.add(index);
+      activeBlocks.set(index, output.content.length - 1);
+      continue;
+    }
+    if (parsed.name === "content_block_delta") {
+      const index = sseIndex(event, parsed.name);
+      const blockIndex = activeBlocks.get(index);
+      if (blockIndex === undefined) {
+        throw new Error(
+          `Anthropic beta messages SSE content block delta has no active block at index ${String(index)}`,
+        );
+      }
+      const block = blocks[blockIndex];
+      if (block === undefined) {
+        throw new Error(`Anthropic beta messages SSE content block ${String(index)} is missing`);
+      }
+      const delta = event["delta"];
+      if (!isPlainObject(delta)) {
+        throw new Error("Anthropic beta messages SSE content_block_delta.delta must be an object");
+      }
+      if (delta["type"] === "text_delta" && block["type"] === "text") {
+        const text = delta["text"];
+        if (typeof text !== "string") {
+          throw new Error("Anthropic beta messages SSE text_delta.text must be a string");
+        }
+        block["text"] = `${block["text"] as string}${text}`;
+        stream.push({ type: "text_delta", contentIndex: blockIndex, delta: text, partial: output });
+      } else if (delta["type"] === "thinking_delta" && block["type"] === "thinking") {
+        const thinking = delta["thinking"];
+        if (typeof thinking !== "string") {
+          throw new Error("Anthropic beta messages SSE thinking_delta.thinking must be a string");
+        }
+        block["thinking"] = `${block["thinking"] as string}${thinking}`;
+        stream.push({
+          type: "thinking_delta",
+          contentIndex: blockIndex,
+          delta: thinking,
+          partial: output,
+        });
+      } else if (delta["type"] === "input_json_delta" && block["type"] === "toolCall") {
+        const partialJson = delta["partial_json"];
+        if (typeof partialJson !== "string" || typeof block.partialJson !== "string") {
+          throw new Error("Anthropic beta messages SSE tool JSON delta is malformed");
+        }
+        block.partialJson += partialJson;
+        const partialArguments = parseStreamingJsonFragment(block.partialJson);
+        if (partialArguments !== undefined) block["arguments"] = partialArguments;
+        stream.push({
+          type: "toolcall_delta",
+          contentIndex: blockIndex,
+          delta: partialJson,
+          partial: output,
+        });
+      } else if (delta["type"] === "signature_delta" && block["type"] === "thinking") {
+        const signature = delta["signature"];
+        if (typeof signature !== "string") {
+          throw new Error("Anthropic beta messages SSE signature_delta.signature must be a string");
+        }
+        block["thinkingSignature"] = `${block["thinkingSignature"] as string}${signature}`;
+      } else {
+        throw new Error(
+          `Anthropic beta messages SSE delta ${String(delta["type"])} does not match its active content block`,
+        );
+      }
+      continue;
+    }
+    if (parsed.name === "content_block_stop") {
+      const index = sseIndex(event, parsed.name);
+      const blockIndex = activeBlocks.get(index);
+      if (blockIndex === undefined) {
+        throw new Error(
+          `Anthropic beta messages SSE content block stop has no active block at index ${String(index)}`,
+        );
+      }
+      const block = blocks[blockIndex];
+      if (block === undefined) {
+        throw new Error(`Anthropic beta messages SSE content block ${String(index)} is missing`);
+      }
+      activeBlocks.delete(index);
+      delete block.index;
+      if (block["type"] === "text") {
+        stream.push({
+          type: "text_end",
+          contentIndex: blockIndex,
+          content: block["text"] as string,
+          partial: output,
+        });
+      } else if (block["type"] === "thinking") {
+        stream.push({
+          type: "thinking_end",
+          contentIndex: blockIndex,
+          content: block["thinking"] as string,
+          partial: output,
+        });
+      } else if (block["type"] === "toolCall") {
+        if (typeof block.partialJson !== "string") {
+          throw new Error("Anthropic beta messages SSE tool call lost its JSON accumulator");
+        }
+        if (block.partialJson.length > 0) {
+          block["arguments"] = parseCompleteToolArguments(block.partialJson);
+        }
+        delete block.partialJson;
+        stream.push({
+          type: "toolcall_end",
+          contentIndex: blockIndex,
+          toolCall: block,
+          partial: output,
+        });
+      } else {
+        throw new Error("Anthropic beta messages SSE active content block has an invalid type");
+      }
+      continue;
+    }
+    if (parsed.name === "message_delta") {
+      if (sawMessageDelta || activeBlocks.size > 0) {
+        throw new Error(
+          "Anthropic beta messages SSE message_delta arrived before all content blocks stopped",
+        );
+      }
+      const delta = event["delta"];
+      if (!isPlainObject(delta)) {
+        throw new Error("Anthropic beta messages SSE message_delta.delta must be an object");
+      }
+      output.stopReason = mapStopReason(
+        nonEmptyString(delta["stop_reason"], "SSE message_delta.stop_reason"),
+      );
+      updateAnthropicUsage(output, sseUsage(event, "message_delta"), model);
+      sawMessageDelta = true;
+      continue;
+    }
+    if (parsed.name === "message_stop") {
+      if (!sawMessageDelta || activeBlocks.size > 0) {
+        throw new Error(
+          "Anthropic beta messages SSE message_stop arrived before message_delta or block closure",
+        );
+      }
+      sawMessageStop = true;
+      continue;
+    }
+    throw new Error(`Anthropic beta messages SSE event ${parsed.name} is unsupported`);
+  }
+
+  if (!sawMessageStop) {
+    throw new Error("Anthropic beta messages SSE stream ended before message_stop");
+  }
+}
+
 export function streamAnthropicViaBetaMessages(
   model: PiModelLike,
   context: PiStreamContext,
@@ -1672,6 +2081,7 @@ export function streamAnthropicViaBetaMessages(
   }
 
   void (async () => {
+    let activeAbortScope: RequestAbortScope | undefined;
     try {
       const apiKey = options?.apiKey;
       if (typeof apiKey !== "string" || apiKey.length === 0) {
@@ -1706,6 +2116,7 @@ export function streamAnthropicViaBetaMessages(
           "Anthropic attribution could not derive session_id from rewritten metadata.user_id",
         );
 
+      const configuredTransport = transportOptions(options);
       const baseUrl =
         model.baseUrl && model.baseUrl.length > 0
           ? model.baseUrl.replace(/\/$/, "")
@@ -1717,8 +2128,15 @@ export function streamAnthropicViaBetaMessages(
         headers,
         body: JSON.stringify(params),
       };
-      if (options?.signal) requestInit.signal = options.signal;
-      const response = await fetch(url, requestInit);
+      const fetched = await fetchAnthropicResponse({
+        url,
+        requestInit,
+        parentSignal: options?.signal,
+        timeoutMs: configuredTransport.timeoutMs,
+        maxRetries: configuredTransport.maxRetries,
+      });
+      const response = fetched.response;
+      activeAbortScope = fetched.abortScope;
       await options?.onResponse?.(
         { status: response.status, headers: headersToRecord(response.headers) },
         model,
@@ -1730,183 +2148,15 @@ export function streamAnthropicViaBetaMessages(
       }
 
       stream.push({ type: "start", partial: output });
-      const blocks = output.content as Array<JsonObject & { index?: number; partialJson?: string }>;
-      for await (const event of iterateSseEvents(response, options?.signal)) {
-        if (event["type"] === "message_start" && isPlainObject(event["message"])) {
-          if (typeof event["message"]["id"] === "string")
-            output.responseId = event["message"]["id"];
-          updateAnthropicUsage(
-            output,
-            isPlainObject(event["message"]["usage"]) ? event["message"]["usage"] : undefined,
-            model,
-          );
-        } else if (
-          event["type"] === "content_block_start" &&
-          typeof event["index"] === "number" &&
-          isPlainObject(event["content_block"])
-        ) {
-          const contentBlock = event["content_block"];
-          if (contentBlock["type"] === "text") {
-            output.content.push({ type: "text", text: "", index: event["index"] });
-            stream.push({
-              type: "text_start",
-              contentIndex: output.content.length - 1,
-              partial: output,
-            });
-          } else if (contentBlock["type"] === "thinking") {
-            output.content.push({
-              type: "thinking",
-              thinking: "",
-              thinkingSignature: "",
-              index: event["index"],
-            });
-            stream.push({
-              type: "thinking_start",
-              contentIndex: output.content.length - 1,
-              partial: output,
-            });
-          } else if (contentBlock["type"] === "redacted_thinking") {
-            output.content.push({
-              type: "thinking",
-              thinking: "[Reasoning redacted]",
-              thinkingSignature: contentBlock["data"],
-              redacted: true,
-              index: event["index"],
-            });
-            stream.push({
-              type: "thinking_start",
-              contentIndex: output.content.length - 1,
-              partial: output,
-            });
-          } else if (contentBlock["type"] === "tool_use") {
-            output.content.push({
-              type: "toolCall",
-              id: contentBlock["id"],
-              name: contentBlock["name"],
-              arguments: (() => {
-                if (!isPlainObject(contentBlock["input"])) {
-                  throw new Error("Anthropic tool_use input must be an object");
-                }
-                return contentBlock["input"];
-              })(),
-              partialJson: "",
-              index: event["index"],
-            });
-            stream.push({
-              type: "toolcall_start",
-              contentIndex: output.content.length - 1,
-              partial: output,
-            });
-          }
-        } else if (
-          event["type"] === "content_block_delta" &&
-          typeof event["index"] === "number" &&
-          isPlainObject(event["delta"])
-        ) {
-          const blockIndex = blocks.findIndex((block) => block.index === event["index"]);
-          const block = blocks[blockIndex];
-          if (!block) continue;
-          const delta = event["delta"];
-          if (
-            delta["type"] === "text_delta" &&
-            block["type"] === "text" &&
-            typeof delta["text"] === "string"
-          ) {
-            block["text"] = `${String(block["text"] ?? "")}${delta["text"]}`;
-            stream.push({
-              type: "text_delta",
-              contentIndex: blockIndex,
-              delta: delta["text"],
-              partial: output,
-            });
-          } else if (
-            delta["type"] === "thinking_delta" &&
-            block["type"] === "thinking" &&
-            typeof delta["thinking"] === "string"
-          ) {
-            block["thinking"] = `${String(block["thinking"] ?? "")}${delta["thinking"]}`;
-            stream.push({
-              type: "thinking_delta",
-              contentIndex: blockIndex,
-              delta: delta["thinking"],
-              partial: output,
-            });
-          } else if (
-            delta["type"] === "input_json_delta" &&
-            block["type"] === "toolCall" &&
-            typeof delta["partial_json"] === "string"
-          ) {
-            if (typeof block.partialJson !== "string") {
-              throw new Error("Anthropic streamed tool call is missing its JSON accumulator");
-            }
-            block.partialJson += delta["partial_json"];
-            const partialArguments = parseStreamingJsonFragment(block.partialJson);
-            if (partialArguments !== undefined) block["arguments"] = partialArguments;
-            stream.push({
-              type: "toolcall_delta",
-              contentIndex: blockIndex,
-              delta: delta["partial_json"],
-              partial: output,
-            });
-          } else if (
-            delta["type"] === "signature_delta" &&
-            block["type"] === "thinking" &&
-            typeof delta["signature"] === "string"
-          ) {
-            block["thinkingSignature"] =
-              `${String(block["thinkingSignature"] ?? "")}${delta["signature"]}`;
-          }
-        } else if (event["type"] === "content_block_stop" && typeof event["index"] === "number") {
-          const blockIndex = blocks.findIndex((block) => block.index === event["index"]);
-          const block = blocks[blockIndex];
-          if (!block) continue;
-          delete block.index;
-          if (block["type"] === "text") {
-            stream.push({
-              type: "text_end",
-              contentIndex: blockIndex,
-              content: String(block["text"] ?? ""),
-              partial: output,
-            });
-          } else if (block["type"] === "thinking") {
-            stream.push({
-              type: "thinking_end",
-              contentIndex: blockIndex,
-              content: String(block["thinking"] ?? ""),
-              partial: output,
-            });
-          } else if (block["type"] === "toolCall") {
-            if (typeof block.partialJson !== "string") {
-              throw new Error("Anthropic streamed tool call is missing its JSON accumulator");
-            }
-            block["arguments"] =
-              block.partialJson.length === 0
-                ? block["arguments"]
-                : parseCompleteToolArguments(block.partialJson);
-            delete block.partialJson;
-            stream.push({
-              type: "toolcall_end",
-              contentIndex: blockIndex,
-              toolCall: block,
-              partial: output,
-            });
-          }
-        } else if (event["type"] === "message_delta") {
-          if (isPlainObject(event["delta"]) && event["delta"]["stop_reason"])
-            output.stopReason = mapStopReason(event["delta"]["stop_reason"]);
-          updateAnthropicUsage(
-            output,
-            isPlainObject(event["usage"]) ? event["usage"] : undefined,
-            model,
-          );
-        }
-      }
+      await processAnthropicSse(response, activeAbortScope.signal, output, stream, model);
       if (options?.signal?.aborted) throw new Error("Request was aborted");
-      if (output.stopReason === "error")
-        throw new Error(output.errorMessage || "Anthropic stream ended with error stop reason");
+      activeAbortScope.close();
+      activeAbortScope = undefined;
       stream.push({ type: "done", reason: output.stopReason, message: output });
       stream.end();
     } catch (error) {
+      activeAbortScope?.close();
+      activeAbortScope = undefined;
       for (const block of output.content) {
         delete block["index"];
         delete block["partialJson"];
