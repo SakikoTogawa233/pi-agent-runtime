@@ -476,7 +476,12 @@ export function resolveContainedPath(parent: string, childPath: string): string 
   if (child === parentPath) throw new Error("Contained path must identify a child path");
 
   const parentRealPath = realpathSync(parentPath);
-  const existingAncestorRealPath = realpathSync(nearestExistingAncestor(child));
-  assertPathContained(parentRealPath, existingAncestorRealPath);
-  return child;
+  const existingAncestor = nearestExistingAncestor(child);
+  const existingAncestorRealPath = realpathSync(existingAncestor);
+  const canonicalChild = resolve(existingAncestorRealPath, relative(existingAncestor, child));
+  assertPathContained(parentRealPath, canonicalChild);
+  if (canonicalChild === parentRealPath) {
+    throw new Error("Contained path must identify a child path");
+  }
+  return canonicalChild;
 }
