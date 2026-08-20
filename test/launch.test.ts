@@ -200,6 +200,30 @@ describe("Pi launch", () => {
     await expect(capture.completed).rejects.toBe(failure);
   });
 
+  it("does not resolve completion when child close races ahead of stdin EPIPE", async () => {
+    const child = new FakeChild();
+    const capture = spawnPiChild({
+      launch: { executable: "pi", argvPrefix: [], kind: "path" },
+      piArgs: [],
+      stdin: Buffer.from("payload", "utf8"),
+      spawnOptions: {},
+      platform: "linux",
+      spawn: () => child as never,
+    });
+    let settled = false;
+    void capture.completed.finally(() => {
+      settled = true;
+    });
+
+    child.emit("close", 0, null);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    const failure = Object.assign(new Error("late EPIPE"), { code: "EPIPE" });
+    child.stdin.emit("error", failure);
+    await expect(capture.completed).rejects.toBe(failure);
+  });
+
   it("rejects escaped package bins and oversized Windows command lines loudly", async () => {
     const built = await fixture();
     const manifest = join(
