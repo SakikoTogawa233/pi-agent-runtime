@@ -3,7 +3,10 @@ import {
   ANTHROPIC_ATTRIBUTION_CLAIM_CHANNEL,
   type AnthropicAttributionExtensionHost,
   type AnthropicContextLike,
+  buildAnthropicRequestParams,
   createAnthropicAttributionExtension,
+  type PiModelLike,
+  resolveCacheRetentionPreference,
   rewriteAnthropicRequestPayload,
 } from "../src/anthropic-attribution.js";
 
@@ -12,6 +15,13 @@ const badLines = [
   "- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md)",
   "- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing",
 ] as const;
+
+const anthropicModel: PiModelLike = {
+  provider: "anthropic",
+  id: "claude-sonnet-4-5",
+  maxTokens: 64_000,
+  reasoning: true,
+};
 
 function context(provider = "anthropic"): AnthropicContextLike {
   return {
@@ -76,6 +86,74 @@ function recordingHost(bus: SynchronousBus): {
     handlers,
   };
 }
+
+describe("Anthropic request contracts", () => {
+  it("rejects malformed direct cache retention instead of degrading it to short retention", () => {
+    expect(() =>
+      resolveCacheRetentionPreference({ cacheRetention: "invalid" as never, env: {} }),
+    ).toThrow(/cacheRetention/);
+    expect(() =>
+      buildAnthropicRequestParams(
+        anthropicModel,
+        { messages: [{ role: "user", content: "hello" }] },
+        { cacheRetention: "invalid" as never, env: {} },
+      ),
+    ).toThrow(/cacheRetention/);
+  });
+
+  it("rejects unknown user, tool-result, and assistant content blocks", () => {
+    const malformedMessages = [
+      [{ role: "user", content: [{ type: "audio", mimeType: "audio/wav", data: "AA==" }] }],
+      [
+        {
+          role: "toolResult",
+          toolCallId: "call-1",
+          content: [{ type: "file", mimeType: "application/pdf", data: "AA==" }],
+        },
+      ],
+      [{ role: "assistant", content: [{ type: "future", value: "not representable" }] }],
+      [{ role: "assistant", content: [{ type: "text", text: 42 }] }],
+    ];
+
+    for (const messages of malformedMessages) {
+      expect(() =>
+        buildAnthropicRequestParams(anthropicModel, { messages: messages as never }, {
+          cacheRetention: "none",
+        }),
+      ).toThrow(/message|content block/i);
+    }
+  });
+
+  it("rejects unknown message roles and incomplete thinking blocks", () => {
+    expect(() =>
+      buildAnthropicRequestParams(
+        anthropicModel,
+        { messages: [{ role: "future", content: "ignored" }] as never },
+        { cacheRetention: "none" },
+      ),
+    ).toThrow(/message role/i);
+    expect(() =>
+      buildAnthropicRequestParams(
+        anthropicModel,
+        {
+          messages: [
+            {
+              role: "assistant",
+              content: [{ type: "thinking", thinking: "reasoning without signature" }],
+            },
+          ],
+        },
+        { cacheRetention: "none" },
+      ),
+    ).toThrow(/thinkingSignature/);
+  });
+
+  it("rejects a conversation that converts to no Anthropic messages", () => {
+    expect(() =>
+      buildAnthropicRequestParams(anthropicModel, { messages: [] }, { cacheRetention: "none" }),
+    ).toThrow(/at least one message/);
+  });
+});
 
 describe("Anthropic attribution and sanitization", () => {
   it("preserves the extracted payload bytes except for attribution and exact-line sanitization", () => {
