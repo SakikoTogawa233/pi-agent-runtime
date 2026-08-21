@@ -1,6 +1,6 @@
 {
   "name": "@sakiko233/pi-agent-runtime",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Shared audited child-agent runtime primitives for Pi subagent and Fusion packages.",
   "keywords": [
     "pi-coding-agent",
