@@ -64,7 +64,8 @@
     "./token-budget": {
       "types": "./dist/token-budget.d.ts",
       "import": "./dist/token-budget.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "publishConfig": {
     "access": "public"
@@ -73,7 +74,8 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "check": "biome check .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
