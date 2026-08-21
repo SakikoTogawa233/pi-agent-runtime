@@ -63,6 +63,11 @@ describe("packed runtime package", () => {
   });
 
   it("resolves published exports from production installs for both future consumer package names", async () => {
+    const runtimeVersion = (
+      JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8")) as {
+        version: string;
+      }
+    ).version;
     const packOutput = execFileSync("npm", ["pack", "--json"], {
       cwd: repoRoot,
       encoding: "utf8",
@@ -99,7 +104,7 @@ describe("packed runtime package", () => {
       );
       await writeFile(
         join(dir, "verify.mjs"),
-        "import { canonicalJson } from '@sakiko233/pi-agent-runtime';\nimport { createAnthropicAttributionExtension } from '@sakiko233/pi-agent-runtime/anthropic-attribution';\nimport { spawnPiChild } from '@sakiko233/pi-agent-runtime/launch';\nimport { createRequire } from 'node:module';\nconst require=createRequire(import.meta.url);\nconst pkg=require('@sakiko233/pi-agent-runtime/package.json');\nif(pkg.version!=='0.1.0'||canonicalJson({b:2,a:1})!=='{\"a\":1,\"b\":2}'||typeof createAnthropicAttributionExtension!=='function'||typeof spawnPiChild!=='function') process.exit(1);\n",
+        `import { canonicalJson } from '@sakiko233/pi-agent-runtime';\nimport { createAnthropicAttributionExtension } from '@sakiko233/pi-agent-runtime/anthropic-attribution';\nimport { spawnPiChild } from '@sakiko233/pi-agent-runtime/launch';\nimport { createRequire } from 'node:module';\nconst require=createRequire(import.meta.url);\nconst pkg=require('@sakiko233/pi-agent-runtime/package.json');\nif(pkg.version!=='${runtimeVersion}'||canonicalJson({b:2,a:1})!=='{"a":1,"b":2}'||typeof createAnthropicAttributionExtension!=='function'||typeof spawnPiChild!=='function') process.exit(1);\n`,
       );
     }
     execFileSync("npm", ["install", "--omit=dev", "--ignore-scripts"], {
