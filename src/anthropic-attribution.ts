@@ -17,16 +17,16 @@ import type {
   ToolCall,
 } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream, hasApi } from "@earendil-works/pi-ai";
-import {
-  getJsonSchemaToolParameters,
-  resolveJsonSchemaStrictSampling,
-} from "@earendil-works/pi-ai/api/constrained-sampling";
 import type {
   ExtensionAPI,
   ExtensionContext,
   ExtensionFactory,
   ProviderConfig,
 } from "@earendil-works/pi-coding-agent";
+import {
+  getJsonSchemaToolParameters,
+  resolveJsonSchemaStrictSampling,
+} from "./constrained-sampling.js";
 import { assertJsonValue } from "./json-value.js";
 
 export const CLAUDE_CODE_SESSION_HEADER = "X-Claude-Code-Session-Id";
